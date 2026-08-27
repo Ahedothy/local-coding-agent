@@ -15,6 +15,7 @@ from .base import Tool, ToolContext, ToolResult
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 300.0
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
 MAX_OUTPUT_CHARS = 100_000
 
@@ -82,6 +83,26 @@ def _decode_output(data: bytes, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], truncated
 
 
+async def _cleanup_process(
+    process: asyncio.subprocess.Process,
+) -> tuple[bytes, bytes]:
+    """Kill a process and bound the wait for its pipes to close."""
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            process.communicate(),
+            timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS,
+        )
+        return stdout_bytes, stderr_bytes
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Cleanup is best effort. The caller must retain the original outcome.
+        return b"", b""
+
+
 class ExecuteCommandTool(Tool):
     name: ClassVar[str] = "execute_command"
     description: ClassVar[str] = "Run a non-interactive command locally inside the workspace."
@@ -113,14 +134,7 @@ class ExecuteCommandTool(Tool):
                 timeout=arguments.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=2.0,
-                )
-            except asyncio.TimeoutError:
-                stdout_bytes, stderr_bytes = b"", b""
+            stdout_bytes, stderr_bytes = await _cleanup_process(process)
             stdout, stdout_truncated = _decode_output(stdout_bytes, arguments.max_output_chars)
             stderr, stderr_truncated = _decode_output(stderr_bytes, arguments.max_output_chars)
             return ToolResult(
@@ -141,8 +155,7 @@ class ExecuteCommandTool(Tool):
                 },
             )
         except asyncio.CancelledError:
-            process.kill()
-            await process.communicate()
+            await _cleanup_process(process)
             raise
 
         stdout, stdout_truncated = _decode_output(stdout_bytes, arguments.max_output_chars)

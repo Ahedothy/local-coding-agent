@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
+from coding_agent.tools import command as command_module
 from coding_agent.tools.command import COMMAND_TOOLS, ExecuteCommandArguments
 from coding_agent.workspace import Workspace
 
@@ -117,3 +118,47 @@ def test_execute_command_accepts_json_encoded_argument_array(tmp_path: Path) -> 
 def test_execute_command_still_rejects_plain_shell_string() -> None:
     with pytest.raises(ValidationError):
         ExecuteCommandArguments.model_validate({"command": "python -m pytest"})
+
+
+def test_execute_command_cancellation_bounds_process_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.kill_called = False
+            self.communicate_calls = 0
+
+        def kill(self) -> None:
+            self.kill_called = True
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise asyncio.CancelledError
+            await asyncio.Event().wait()
+            return b"", b""
+
+    fake_process = FakeProcess()
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        return fake_process
+
+    monkeypatch.setattr(command_module.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(command_module, "PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.01)
+
+    async def run() -> None:
+        executor = ToolExecutor(ToolRegistry(COMMAND_TOOLS))
+        with pytest.raises(asyncio.CancelledError):
+            await executor.execute(
+                ToolCall(
+                    id="call-1",
+                    name="execute_command",
+                    arguments={"command": ["python", "-c", "pass"]},
+                ),
+                make_context(tmp_path),
+            )
+
+    asyncio.run(run())
+    assert fake_process.kill_called is True
+    assert fake_process.communicate_calls == 2
