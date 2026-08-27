@@ -45,7 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="mock",
         help="Model provider mode; real is reserved for Milestone 12.",
     )
-    parser.add_argument("task", help="Programming task for the agent.")
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Keep the same Agent session for multiple user turns.",
+    )
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="Programming task for one-shot mode or the optional first turn.",
+    )
     return parser
 
 
@@ -86,10 +95,40 @@ def _build_real_agent(workspace: Workspace, event_handler) -> Agent:
     )
 
 
+def _print_result(result) -> None:
+    """Print one turn's result without adding orchestration to the CLI."""
+    if result.final_answer is not None:
+        print("\nFinal answer:")
+        print(result.final_answer)
+    else:
+        print(f"\nAgent did not complete: {result.error}", file=sys.stderr)
+
+
+async def _run_interactive(agent: Agent, initial_task: str | None) -> None:
+    """Read user turns and reuse one Agent until the user exits."""
+    if initial_task is not None:
+        _print_result(await agent.run_turn(initial_task))
+
+    while True:
+        try:
+            user_message = input("> ")
+        except EOFError:
+            print()
+            return
+
+        if user_message.strip() in {"/exit", "/quit"}:
+            return
+        if not user_message.strip():
+            continue
+        _print_result(await agent.run_turn(user_message))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI arguments, run Agent Core, and return a process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not args.interactive and args.task is None:
+        parser.error("the following arguments are required: task")
 
     try:
         workspace = Workspace(args.workspace)
@@ -97,16 +136,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent = _build_mock_agent(workspace, print_event)
         else:
             agent = _build_real_agent(workspace, print_event)
+        if args.interactive:
+            asyncio.run(_run_interactive(agent, args.task))
+            return 0
         result = asyncio.run(agent.run(args.task))
     except Exception as exc:
         print(f"Unable to start agent: {exc}", file=sys.stderr)
         return 2
 
-    if result.final_answer is not None:
-        print("\nFinal answer:")
-        print(result.final_answer)
-    else:
-        print(f"\nAgent did not complete: {result.error}", file=sys.stderr)
+    _print_result(result)
     return 0 if result.status.value == "completed" else 1
 
 if __name__ == "__main__":

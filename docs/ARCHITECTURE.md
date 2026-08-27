@@ -268,6 +268,31 @@ Forced termination:
 - task timeout
 - user cancellation
 
+## User-Level Multi-Turn Conversation
+
+The current MVP already has an internal multi-iteration agent loop: one user task can lead to many model calls, tool calls, tool results, and a final answer.
+
+The next important capability is user-level multi-turn conversation:
+
+```text
+user turn 1 -> agent loop -> final answer
+user turn 2 -> same Session + same ContextManager -> agent loop -> final answer
+user turn 3 -> same Session + same ContextManager -> agent loop -> final answer
+```
+
+This is different from the existing one-task CLI process. Multi-turn support must be implemented in Agent Core first, then exposed through an interactive CLI.
+
+Required design rules:
+
+- Keep one `Session`, one `ContextManager`, one `ToolExecutor`, and one `ModelProvider` for the whole conversation.
+- Each user turn gets its own run counters: iterations, tool calls, repeated failed tool calls, parse errors, and timeout.
+- Conversation history remains in `ContextManager` across turns, so the model can refer to earlier user instructions, prior tool results, and previous assistant answers.
+- A completed turn must not permanently mark the whole session as unusable. The session may return to an idle/waiting state after a completed turn.
+- Cancellation applies to the currently running turn, not to the entire conversation object.
+- Interactive CLI is only a transport wrapper. It must not implement the agent loop, tool routing, context truncation, or model parsing.
+
+MVP multi-turn should not add persistent restore, SQLite, JSONL replay, FastAPI sessions, or React chat state. In-memory conversation is enough for the next milestone and is easier to explain in an interview.
+
 ## Tool System
 
 MVP tools:

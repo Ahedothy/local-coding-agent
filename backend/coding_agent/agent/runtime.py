@@ -7,6 +7,7 @@ import inspect
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from coding_agent.context import ContextManager
@@ -63,6 +64,9 @@ class Agent:
             workspace=Workspace(session.workspace_root),
         )
         self._cancel_event = asyncio.Event()
+        self._turn_lock = asyncio.Lock()
+        self._turn_index = 0
+        self._session_started = False
         self._iterations = 0
         self._tool_calls = 0
 
@@ -74,32 +78,54 @@ class Agent:
         self._cancel_event.set()
 
     async def run(self, task: str) -> AgentRunResult:
-        """Run the Agent loop for one user task."""
+        """Run one task, preserving the historical one-shot API."""
+        return await self.run_turn(task)
+
+    async def run_turn(self, user_message: str) -> AgentRunResult:
+        """Run one user turn while preserving the session conversation."""
+        if self._turn_lock.locked():
+            return AgentRunResult(
+                status=SessionStatus.FAILED,
+                error="agent is already running a turn",
+            )
+
+        async with self._turn_lock:
+            return await self._run_turn_locked(user_message)
+
+    async def _run_turn_locked(self, user_message: str) -> AgentRunResult:
+        """Execute a turn after exclusive ownership has been acquired."""
         self._iterations = 0
         self._tool_calls = 0
-        self.session.task = task
+        self._turn_index += 1
+        self.session.task = user_message
         self.session.status = SessionStatus.RUNNING
-        await self._emit(
-            AgentEvent(
-                type=AgentEventType.SESSION_STARTED,
-                session_id=self.session.session_id,
-                payload={"workspace_root": str(self.tool_context.workspace.root)},
+        self.session.updated_at = datetime.now(timezone.utc)
+        if not self._session_started:
+            self._session_started = True
+            await self._emit(
+                AgentEvent(
+                    type=AgentEventType.SESSION_STARTED,
+                    session_id=self.session.session_id,
+                    payload={"workspace_root": str(self.tool_context.workspace.root)},
+                )
             )
-        )
 
-        if not task.strip():
+        if not user_message.strip():
             result = AgentRunResult(
                 status=SessionStatus.FAILED,
                 error="task must not be empty",
             )
-            return await self._finalize(result)
+            try:
+                return await self._finalize(result)
+            finally:
+                self._cancel_event.clear()
 
-        truncated = self.context_manager.add_user_message(task)
+        truncated = self.context_manager.add_user_message(user_message)
         await self._emit(
             AgentEvent(
                 type=AgentEventType.USER_MESSAGE,
                 session_id=self.session.session_id,
-                payload={"content": task},
+                payload={"content": user_message, "turn_index": self._turn_index},
             )
         )
         await self._emit_context_truncated(truncated)
@@ -135,7 +161,11 @@ class Agent:
                 tool_calls=self._tool_calls,
                 error=f"agent runtime error: {exc}",
             )
-        return await self._finalize(result)
+        try:
+            return await self._finalize(result)
+        finally:
+            # Cancellation belongs to the active turn and must not poison the next one.
+            self._cancel_event.clear()
 
     async def _run_loop(self) -> AgentRunResult:
         parse_errors = 0
@@ -295,7 +325,8 @@ class Agent:
         )
 
     async def _finalize(self, result: AgentRunResult) -> AgentRunResult:
-        self.session.status = result.status
+        self.session.status = SessionStatus.IDLE
+        self.session.updated_at = datetime.now(timezone.utc)
         if result.status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
             await self._emit(
                 AgentEvent(

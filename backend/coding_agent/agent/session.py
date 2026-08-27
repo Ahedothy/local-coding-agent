@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class SessionStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"
+    IDLE = "idle"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -31,4 +32,3 @@ class Session(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)
-

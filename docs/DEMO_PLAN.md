@@ -271,6 +271,50 @@ If the Web UI is not ready, use CLI only. CLI is enough for the evaluation becau
 
 If the real model behaves unpredictably during recording, use a previously rehearsed run and keep the task small. Do not redesign the demo live.
 
+## Multi-Turn Manual Verification
+
+Milestone 14C also verifies the user-level multi-turn capability. This is
+separate from the internal Agent loop: one user turn may still contain several
+model and tool iterations.
+
+Start one interactive session from the `backend/` directory:
+
+```powershell
+python -m coding_agent.cli `
+  --workspace "C:\path\to\workspace" `
+  --provider real `
+  --interactive
+```
+
+Use this short sequence:
+
+```text
+你好，请简单介绍一下你能做什么。
+请读取这个项目的文件，告诉我它的功能。
+现在运行测试并修复失败的测试，尽量只做最小修改。
+/exit
+```
+
+Verification points:
+
+- the process stays alive between user messages
+- each non-blank message produces a new `user_message` and agent run
+- the second and later model requests can use previous conversation context
+- tool events remain visible in the terminal
+- `/exit` or `/quit` exits normally
+- no new Agent is created for each input
+
+The conversation is in memory only. It is intentionally not restored after the
+process exits, and this milestone does not add SQLite, JSONL replay, FastAPI
+sessions, React state, or a WebSocket.
+
+The CLI mock provider is intentionally a one-shot smoke-test provider, so use
+the real provider for this manual multi-turn check. Multi-turn behavior without
+network access is covered by `backend/tests/test_agent_multiturn.py` and the
+CLI tests use a deterministic mock provider setup. Before recording, rehearse
+the real-provider bug-fix demo at least three times. Keep API keys out of the
+terminal recording.
+
 ## What Not to Demo
 
 Do not spend time showing:

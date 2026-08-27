@@ -7,7 +7,8 @@ Build the project in this order:
 ```text
 docs -> skeleton -> workspace -> core types -> tool system -> tools
      -> context -> mock model -> agent loop -> CLI -> real model
-     -> demo -> event log -> optional Web API -> optional React UI
+     -> demo -> multi-turn core -> interactive CLI -> event log
+     -> README -> optional Web API -> optional React UI
 ```
 
 Do not start with the Web UI. The first real goal is a CLI agent that can run a demo task end to end.
@@ -472,7 +473,150 @@ Do not:
 
 - use a large or flaky demo project
 
-## Milestone 14: Optional JSONL Event Log
+## Milestone 14A: Multi-Turn Agent Core
+
+Goal:
+
+- allow one in-memory `Agent` instance to handle multiple user turns while preserving conversation context
+
+Why now:
+
+- this is more important than JSONL logging or Web UI because it proves the `ContextManager` is useful beyond a single task
+- it improves manual testing immediately
+- it is a scoring-relevant Agent Core capability, not UI polish
+
+Modules:
+
+- `backend/coding_agent/agent/runtime.py`
+- `backend/coding_agent/agent/session.py`
+- `backend/tests/test_agent_multiturn.py`
+
+Required behavior:
+
+- add a user message for every new turn
+- preserve previous assistant messages and tool results in the same `ContextManager`
+- reset per-turn counters before each turn
+- reset repeated-tool-call tracking per turn
+- reset cancellation state before starting a new turn
+- emit events for each turn using the existing event system
+- return an `AgentRunResult` for each turn
+- allow a new turn after a previous turn completed successfully
+- fail cleanly if a new turn is requested while the session is already running
+
+Recommended minimal interface:
+
+```text
+Agent.run_turn(user_message: str) -> AgentRunResult
+```
+
+Compatibility rule:
+
+- keep `Agent.run(task)` as a backward-compatible alias for one turn, or have it delegate to `run_turn`
+- existing CLI tests should continue to pass
+
+Session status recommendation:
+
+- add `IDLE = "idle"` or equivalent if needed
+- use `RUNNING` only while a turn is actively executing
+- after successful completion, set status to `IDLE` if the session should accept more turns
+- the `AgentRunResult.status` for the turn can still be `COMPLETED`
+
+Completion criteria:
+
+- two sequential turns reuse the same context
+- the second model request contains messages from the first turn
+- a failed tool call in turn 1 does not poison repeated-failure counters in turn 2
+- cancellation before a turn prevents that turn only and can be cleared for a later turn
+- existing one-shot CLI behavior still works
+
+Tests:
+
+- successful two-turn conversation
+- second turn sees previous final answer in context
+- per-turn limits reset between turns
+- cannot start overlapping turns on the same `Agent`
+- `Agent.run` backward compatibility
+
+Do not:
+
+- add persistence
+- add Web API
+- add JSONL logging
+- implement a CLI REPL inside Agent Core
+- create a new Agent object for every user turn in the interactive path
+
+## Milestone 14B: Interactive CLI Conversation
+
+Goal:
+
+- expose multi-turn conversation through a simple terminal loop
+
+Module:
+
+- `backend/coding_agent/cli.py`
+- `backend/tests/test_cli_runner.py`
+
+CLI behavior:
+
+- keep existing one-shot usage unchanged
+- add an explicit flag such as `--interactive`
+- in interactive mode, create one `Agent` and reuse it until the user exits
+- prompt repeatedly for user input
+- run `agent.run_turn(...)` for each non-empty input
+- support exit commands: `/exit`, `/quit`
+- keep event printing consistent with one-shot mode
+
+Example:
+
+```text
+python -m coding_agent.cli --workspace demo/buggy_calculator --provider real --interactive
+```
+
+Completion criteria:
+
+- user can say "hello"
+- user can ask a follow-up that depends on previous assistant context
+- user can ask a coding task after an earlier conversational turn
+- one-shot CLI command remains unchanged
+
+Tests:
+
+- interactive mode feeds two inputs and exits
+- the same Agent instance is reused
+- empty input does not create a model request
+- `/exit` exits with code 0
+
+Do not:
+
+- build a full TUI
+- add readline/history dependencies
+- add async keyboard cancellation yet
+- put context logic into CLI
+
+## Milestone 14C: Multi-Turn Documentation and Manual Demo
+
+Goal:
+
+- document how multi-turn mode works and how to demo it
+
+Files:
+
+- `docs/MULTI_TURN_PLAN.md`
+- `README.txt`
+- `docs/DEMO_PLAN.md`
+
+Completion criteria:
+
+- README explains one-shot mode and interactive mode
+- docs explain internal loop vs user-level turns
+- demo script includes one short follow-up question before the coding task if time allows
+
+Do not:
+
+- let multi-turn demo replace the main bug-fix demo
+- make the 2-minute video depend on long conversation
+
+## Milestone 15: Optional JSONL Event Log
 
 Goal:
 
@@ -494,7 +638,7 @@ Do not:
 - implement replay
 - implement session restore
 
-## Milestone 15: README and Demo Script
+## Milestone 16: README and Demo Script
 
 Goal:
 
@@ -515,7 +659,7 @@ Completion criteria:
 - explains known limitations
 - includes a 2-minute demo script
 
-## Milestone 16: Optional FastAPI + SSE
+## Milestone 17: Optional FastAPI + SSE
 
 Goal:
 
@@ -541,7 +685,7 @@ Do not:
 - implement multi-user auth
 - implement complex session restore
 
-## Milestone 17: Optional Minimal React UI
+## Milestone 18: Optional Minimal React UI
 
 Goal:
 
@@ -582,6 +726,9 @@ Do not:
 12. `feat: add cli runner`
 13. `feat: add openai-compatible provider`
 14. `test: add demo repository and integration coverage`
-15. `docs: polish readme and demo plan`
-16. `feat: add fastapi sse api`
-17. `feat: add minimal react ui`
+15. `feat: support multi-turn agent sessions`
+16. `feat: add interactive cli mode`
+17. `docs: polish readme and demo plan`
+18. `feat: add jsonl event log`
+19. `feat: add fastapi sse api`
+20. `feat: add minimal react ui`

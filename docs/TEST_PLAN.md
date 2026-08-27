@@ -276,7 +276,103 @@ Assertions:
 - emits cancelled/finished event
 - does not continue executing tools
 
-## 7. Integration Test with Mock LLM
+## 7. Multi-Turn Conversation Tests
+
+Goal:
+
+- prove user-level conversation works without moving Agent logic into CLI or Web UI
+
+Important distinction:
+
+- internal multi-iteration tool loop is already tested by Agent loop tests
+- user-level multi-turn means multiple user inputs share the same `Session` and `ContextManager`
+
+Required scenarios:
+
+### Two successful user turns
+
+Mock model responses:
+
+1. first turn returns a final answer
+2. second turn returns a final answer
+
+Assertions:
+
+- both calls return successful `AgentRunResult`
+- provider receives two separate `ModelRequest` objects
+- second request contains the first user message and first assistant answer
+- session id remains the same
+
+### Follow-up uses previous context
+
+Mock model responses:
+
+1. first turn reads a file and answers
+2. second turn answers a follow-up without re-reading the same file
+
+Assertions:
+
+- first turn includes tool execution
+- second turn request contains prior tool result
+- no new tool call is required for the follow-up when the mock response is final text
+
+### Per-turn limits reset
+
+Mock model responses:
+
+1. first turn uses tool calls near the configured limit and completes
+2. second turn still has a fresh per-turn tool budget
+
+Assertions:
+
+- second turn is not rejected because of first-turn counters
+- repeated failed tool-call counters start fresh for each turn
+
+### Overlapping run protection
+
+Start a turn and attempt to start another turn on the same `Agent` before the first completes.
+
+Assertions:
+
+- second turn fails cleanly or raises a clear local error
+- context is not corrupted
+
+### Cancellation scope
+
+Cancel one running turn, then clear or reset cancellation for the next turn.
+
+Assertions:
+
+- cancelled turn stops cleanly
+- later turn can still run when cancellation is reset by the public API
+
+### Backward compatibility
+
+Call existing `Agent.run(task)`.
+
+Assertions:
+
+- it still behaves like a one-shot turn
+- existing CLI tests continue to pass
+
+## 8. Interactive CLI Tests
+
+Only required after interactive CLI mode is implemented.
+
+Scenarios:
+
+- `--interactive` starts a loop and accepts two user inputs
+- `/exit` or `/quit` exits successfully
+- blank input is ignored
+- the same `Agent` instance handles all inputs
+- one-shot mode still accepts a task argument and exits after one turn
+
+Implementation hint:
+
+- test by monkeypatching standard input rather than calling a real model
+- use `MockModelProvider` for deterministic responses
+
+## 9. Integration Test with Mock LLM
 
 Goal:
 
@@ -302,7 +398,7 @@ Assertions:
 - event sequence contains tool start and finish events
 - Agent finishes successfully
 
-## 8. API/SSE Tests
+## 10. API/SSE Tests
 
 Only required if FastAPI Phase 2 is implemented.
 
@@ -316,7 +412,7 @@ Scenarios:
 
 Do not test real model calls here.
 
-## 9. Manual Real-Model Demo
+## 11. Manual Real-Model Demo
 
 Goal:
 
@@ -339,5 +435,6 @@ Before the project is considered demo-ready:
 - Agent loop tests pass with MockModelProvider
 - workspace security tests pass
 - integration test with mock model passes
+- multi-turn tests pass if Milestone 14A/14B is implemented
 - manual real-model demo has succeeded at least three times
 - no tests require hardcoded secrets
