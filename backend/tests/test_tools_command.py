@@ -52,10 +52,20 @@ def test_execute_command_returns_nonzero_exit_and_output(tmp_path: Path) -> None
         {"command": python_command("import sys; print('bad stdout'); print('bad stderr', file=sys.stderr); sys.exit(3)")},
     )
 
-    assert result.success is True
+    assert result.success is False
+    assert result.error == "command exited with return code 3"
     assert result.output["returncode"] == 3
     assert "bad stdout" in result.output["stdout"]
     assert "bad stderr" in result.output["stderr"]
+
+
+def test_execute_command_reports_missing_executable_structurally(tmp_path: Path) -> None:
+    result = execute_command(tmp_path, {"command": ["definitely-not-installed"]})
+
+    assert result.success is False
+    assert result.output["returncode"] is None
+    assert result.output["executable_found"] is False
+    assert "could not start command" in result.error
 
 
 def test_execute_command_times_out(tmp_path: Path) -> None:

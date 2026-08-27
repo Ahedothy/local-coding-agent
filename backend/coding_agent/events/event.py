@@ -21,6 +21,7 @@ class AgentEventType(str, Enum):
     TOOL_FAILED = "tool_failed"
     ASSISTANT_MESSAGE = "assistant_message"
     CONTEXT_TRUNCATED = "context_truncated"
+    CONTEXT_COMPACTED = "context_compacted"
     AGENT_FINISHED = "agent_finished"
     AGENT_ERROR = "agent_error"
 
@@ -36,4 +37,3 @@ class AgentEvent(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     iteration: int | None = Field(default=None, ge=0)
     payload: dict[str, Any] = Field(default_factory=dict)
-

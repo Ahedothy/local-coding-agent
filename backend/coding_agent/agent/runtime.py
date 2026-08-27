@@ -195,6 +195,7 @@ class Agent:
                     payload={
                         "message_count": len(request.messages),
                         "tool_schema_count": len(request.tools),
+                        "context": self.context_manager.stats.as_dict(),
                     },
                 )
             )
@@ -318,9 +319,22 @@ class Agent:
             return
         await self._emit(
             AgentEvent(
-                type=AgentEventType.CONTEXT_TRUNCATED,
+                type=(
+                    AgentEventType.CONTEXT_COMPACTED
+                    if self.context_manager.last_change is not None
+                    and "summary" in self.context_manager.last_change.strategy
+                    else AgentEventType.CONTEXT_TRUNCATED
+                ),
                 session_id=self.session.session_id,
                 iteration=iteration,
+                payload={
+                    **(
+                        self.context_manager.last_change.as_dict()
+                        if self.context_manager.last_change is not None
+                        else {}
+                    ),
+                    "context": self.context_manager.stats.as_dict(),
+                },
             )
         )
 

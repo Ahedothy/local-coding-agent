@@ -123,8 +123,12 @@ def test_demo_agent_reads_tests_edits_code_and_retests(tmp_path: Path) -> None:
     ] == [
         "read_file",
         "read_file",
-        "execute_command",
         "replace_in_file",
         "replace_in_file",
         "execute_command",
     ]
+    assert any(
+        event.type.value == "tool_failed"
+        and event.payload.get("tool_name") == "execute_command"
+        for event in events
+    )

@@ -113,6 +113,8 @@ Scenarios:
 
 - runs a successful command
 - returns non-zero exit code for a failing command
+- marks non-zero exit code as `success=false` and emits a failed tool event
+- reports a missing executable with a structured start failure
 - kills timed-out command
 - truncates stdout and stderr
 - rejects cwd outside workspace

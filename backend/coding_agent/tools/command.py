@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -83,6 +84,28 @@ def _decode_output(data: bytes, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], truncated
 
 
+def _normalize_local_windows_executable(command: list[str], cwd: Path) -> list[str]:
+    """Resolve a workspace-local executable explicitly on Windows.
+
+    ``CreateProcess`` is less forgiving than an interactive shell for local
+    executables. If the model asks for ``hello.exe`` and that file exists in
+    the validated cwd, use an explicit relative path. The original arguments
+    are left untouched on other platforms or for PATH-resolved commands.
+    """
+    if os.name != "nt" or not command:
+        return command
+    executable = Path(command[0])
+    if executable.is_absolute() or executable.parent != Path("."):
+        return command
+    candidates = [cwd / executable]
+    if executable.suffix.casefold() != ".exe":
+        candidates.append(cwd / f"{executable.name}.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return [f".\\{candidate.name}", *command[1:]]
+    return command
+
+
 async def _cleanup_process(
     process: asyncio.subprocess.Process,
 ) -> tuple[bytes, bytes]:
@@ -119,14 +142,36 @@ class ExecuteCommandTool(Tool):
             )
 
         cwd = context.workspace.resolve_cwd(arguments.cwd)
+        command = _normalize_local_windows_executable(arguments.command, cwd)
         started_at = time.monotonic()
-        process = await asyncio.create_subprocess_exec(
-            *arguments.command,
-            cwd=str(cwd),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(cwd),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            return ToolResult(
+                tool_call_id="pending",
+                tool_name=self.name,
+                success=False,
+                error=f"could not start command: {exc}",
+                output={
+                    "command": command,
+                    "requested_command": arguments.command,
+                    "cwd": _relative_path(context.workspace.root, cwd),
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": str(exc),
+                    "duration_seconds": time.monotonic() - started_at,
+                    "timed_out": False,
+                    "executable_found": False,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                },
+            )
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -143,7 +188,7 @@ class ExecuteCommandTool(Tool):
                 success=False,
                 error=f"command timed out after {arguments.timeout_seconds} seconds",
                 output={
-                    "command": arguments.command,
+                    "command": command,
                     "cwd": _relative_path(context.workspace.root, cwd),
                     "returncode": process.returncode,
                     "stdout": stdout,
@@ -163,9 +208,14 @@ class ExecuteCommandTool(Tool):
         return ToolResult(
             tool_call_id="pending",
             tool_name=self.name,
-            success=True,
+            success=process.returncode == 0,
+            error=(
+                None
+                if process.returncode == 0
+                else f"command exited with return code {process.returncode}"
+            ),
             output={
-                "command": arguments.command,
+                "command": command,
                 "cwd": _relative_path(context.workspace.root, cwd),
                 "returncode": process.returncode,
                 "stdout": stdout,

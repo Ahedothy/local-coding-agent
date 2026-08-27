@@ -277,7 +277,7 @@ Rules:
 Completion criteria:
 
 - successful commands return exit code, stdout, stderr, duration
-- failed commands return non-zero exit code and output
+- failed commands return non-zero exit code and output with `success=false`
 - timed-out commands are killed and reported
 - cwd outside workspace is rejected
 

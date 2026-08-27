@@ -129,3 +129,64 @@ def test_tool_call_and_tool_result_are_removed_together_when_budget_is_too_small
     messages = context.get_messages()
     assert not any(message.role == "tool" for message in messages)
     assert not any(message.role == "assistant" and message.tool_calls for message in messages)
+
+
+def test_context_compacts_old_turns_into_structured_memory() -> None:
+    context = ContextManager("System", max_chars=220, recent_message_groups=1)
+    context.add_user_message("Fix the parser and keep the public API unchanged")
+    context.add_assistant_message("I inspected the parser implementation.")
+    context.add_user_message("Please run the tests after the edit")
+    context.add_assistant_message("I will edit parser.py and run pytest.")
+    context.add_user_message("The latest task is still important")
+    context.add_assistant_message("Working on the latest task")
+
+    messages = context.get_messages()
+    assert any(
+        message.role == "system"
+        and (message.content or "").startswith("[conversation memory]")
+        for message in messages
+    )
+    assert context.stats.compaction_count >= 1
+    assert context.stats.summary_chars > 0
+    assert context.last_change is not None
+    assert context.last_change.strategy == "deterministic_extractive_summary"
+    assert any(message.content == "The latest task is still important" for message in messages)
+
+
+def test_context_stats_report_message_and_tool_sizes() -> None:
+    context = ContextManager("System")
+    call = ToolCall(id="call-1", name="read_file", arguments={"path": "a.py"})
+    context.add_user_message("Inspect a.py")
+    context.add_assistant_message(tool_calls=[call])
+    context.add_tool_result(
+        ToolResult(tool_call_id="call-1", tool_name="read_file", success=True, output={"path": "a.py"})
+    )
+
+    stats = context.stats.as_dict()
+    assert stats["message_count"] == 4
+    assert stats["user_message_count"] == 1
+    assert stats["assistant_message_count"] == 1
+    assert stats["tool_message_count"] == 1
+    assert stats["tool_result_chars"] > 0
+    assert stats["total_chars"] <= stats["max_chars"]
+
+
+def test_compaction_never_splits_tool_call_group() -> None:
+    context = ContextManager("System", max_chars=330, recent_message_groups=1)
+    first_call = ToolCall(id="call-1", name="read_file", arguments={"path": "old.py"})
+    context.add_user_message("Inspect old.py")
+    context.add_assistant_message(tool_calls=[first_call])
+    context.add_tool_result(
+        ToolResult(tool_call_id="call-1", tool_name="read_file", success=True, output={"path": "old.py", "content": "x"})
+    )
+    latest_call = ToolCall(id="call-2", name="read_file", arguments={"path": "latest.py"})
+    context.add_user_message("Inspect latest.py")
+    context.add_assistant_message(tool_calls=[latest_call])
+    context.add_tool_result(
+        ToolResult(tool_call_id="call-2", tool_name="read_file", success=True, output={"path": "latest.py", "content": "y"})
+    )
+
+    messages = context.get_messages()
+    tool_ids = {message.tool_call_id for message in messages if message.role == "tool"}
+    assistant_ids = {call.id for message in messages if message.role == "assistant" for call in message.tool_calls}
+    assert tool_ids <= assistant_ids

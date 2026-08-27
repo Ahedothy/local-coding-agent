@@ -18,13 +18,13 @@ const eventLabels: Record<string, string> = {
   session_started: "Session started", user_message: "User message", iteration_started: "Iteration",
   model_request: "Model request", model_response: "Model response", tool_started: "Tool started",
   tool_finished: "Tool finished", tool_failed: "Tool failed", assistant_message: "Assistant message",
-  context_truncated: "Context truncated", agent_finished: "Agent finished", agent_error: "Agent error",
+  context_truncated: "Context truncated", context_compacted: "Context compacted", agent_finished: "Agent finished", agent_error: "Agent error",
 };
 const eventTypes = Object.keys(eventLabels);
 
 function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
-  if (["tool_finished", "agent_finished"].includes(type)) return "success";
+  if (["tool_finished", "agent_finished", "context_compacted"].includes(type)) return "success";
   if (["tool_failed", "agent_error"].includes(type)) return "danger";
   return "neutral";
 }
@@ -54,6 +54,10 @@ function App() {
   useEffect(() => () => eventSource.current?.close(), []);
 
   const latestEvent = events.at(-1);
+  const contextStats = useMemo(() => {
+    const candidate = [...events].reverse().find((event) => event.payload.context && typeof event.payload.context === "object");
+    return candidate?.payload.context as { total_chars?: number; max_chars?: number; utilization?: number; compaction_count?: number } | undefined;
+  }, [events]);
   const activeTool = useMemo(() => events.findLast((event) => event.type === "tool_started")?.payload.tool_name, [events]);
   const finalAnswer = useMemo(() => {
     const event = [...events].reverse().find(
@@ -130,10 +134,11 @@ function App() {
       </section>
 
       <section className="activity-panel" aria-label="Agent activity">
-        <div className="activity-header"><div><div className="section-kicker">Live trace</div><h2>Agent activity</h2></div><div className="trace-meta"><span>{events.length} events</span>{busy && <span className="live-label"><span className="live-dot" />Live</span>}</div></div>
+        <div className="activity-header"><div><div className="section-kicker">Live trace</div><h2>Agent activity</h2></div><div className="trace-meta"><span>{events.length} events</span>{contextStats && <span title="Current model context usage">Context {contextStats.total_chars ?? 0}/{contextStats.max_chars ?? 0}</span>}{busy && <span className="live-label"><span className="live-dot" />Live</span>}</div></div>
         {finalAnswer && !busy && <div className="answer-panel"><div className="answer-heading"><CheckCircle2 size={17} />Final answer</div><p>{finalAnswer}</p></div>}
         <div className="trace-list">{events.length === 0 ? <div className="empty-trace"><div className="empty-icon"><Terminal size={20} /></div><h3>Nothing running yet</h3><p>Open a workspace and run a task to see the model-to-tool loop here.</p></div> : events.map((event) => <article className={`trace-row tone-${eventTone(event.type)}`} key={event.event_id}><div className="trace-icon">{iconForEvent(event.type)}</div><div className="trace-content"><div className="trace-title-line"><strong>{eventLabels[event.type] ?? event.type}</strong><time>{formatTime(event.timestamp)}</time></div>{event.type.startsWith("tool_") && <span className="tool-name">{String(event.payload.tool_name ?? "local tool")}</span>}{event.type === "assistant_message" && typeof event.payload.content === "string" && event.payload.content && <p className="trace-message">{event.payload.content}</p>}{(event.type === "tool_failed" || event.type === "agent_error") && typeof event.payload.error === "string" && event.payload.error && <p className="trace-message">{event.payload.error}</p>}{["model_request", "model_response", "agent_finished"].includes(event.type) && <details><summary>Inspect payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details>}</div></article>)}</div>
         {latestEvent && busy && typeof activeTool === "string" && <div className="activity-footer"><LoaderCircle className="spin" size={14} />Working with <strong>{activeTool}</strong></div>}
+        {contextStats && contextStats.compaction_count ? <div className="context-status">Memory compression active - {contextStats.compaction_count} compaction{contextStats.compaction_count === 1 ? "" : "s"}</div> : null}
       </section>
     </main>
     <footer className="footer-bar"><span>Agent Core stays on the backend</span><span>FastAPI · SSE · local tools</span></footer>
