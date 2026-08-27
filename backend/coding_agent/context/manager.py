@@ -93,6 +93,11 @@ class ContextManager:
             tool_call_id=result.tool_call_id,
             name=result.tool_name,
         )
+        if not self._has_matching_tool_call(result.tool_call_id):
+            # A previous budget pass may have removed the assistant request.
+            # Keeping this result would create an invalid provider context.
+            self.last_truncated = True
+            return True
         budget_truncated = self._append(message)
         return content_truncated or budget_truncated
 
@@ -103,6 +108,13 @@ class ContextManager:
             "error": result.error,
         }
         return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def _has_matching_tool_call(self, tool_call_id: str) -> bool:
+        return any(
+            message.role == "assistant"
+            and any(tool_call.id == tool_call_id for tool_call in message.tool_calls)
+            for message in self._messages
+        )
 
     def _append(self, message: ModelMessage) -> bool:
         self._messages.append(message)
@@ -132,15 +144,49 @@ class ContextManager:
         if latest_user_index is not None:
             remaining -= message_character_count(self._messages[latest_user_index])
 
-        for index in range(len(self._messages) - 1, 0, -1):
-            if index in preserved_indices:
+        for indices in reversed(self._message_groups()):
+            group_indices = set(indices)
+            if group_indices & preserved_indices:
                 continue
-            message_size = message_character_count(self._messages[index])
-            if message_size <= remaining:
-                kept_indices.add(index)
-                remaining -= message_size
+            group_size = sum(
+                message_character_count(self._messages[index]) for index in indices
+            )
+            if group_size <= remaining:
+                kept_indices.update(group_indices)
+                remaining -= group_size
 
         self._messages = [
             message for index, message in enumerate(self._messages) if index in kept_indices
         ]
         return True
+
+    def _message_groups(self) -> list[list[int]]:
+        """Build atomic groups so tool calls and their results are never split.
+
+        A model assistant message containing tool calls is grouped with the
+        following matching tool messages. An orphan tool message is placed in
+        a group that can never be retained by the budget algorithm.
+        """
+        groups: list[list[int]] = []
+        index = 1
+        while index < len(self._messages):
+            message = self._messages[index]
+            if message.role == "tool":
+                groups.append([])
+                index += 1
+                continue
+
+            group = [index]
+            index += 1
+            if message.role == "assistant" and message.tool_calls:
+                expected_ids = {tool_call.id for tool_call in message.tool_calls}
+                while index < len(self._messages):
+                    next_message = self._messages[index]
+                    if next_message.role != "tool":
+                        break
+                    if next_message.tool_call_id not in expected_ids:
+                        break
+                    group.append(index)
+                    index += 1
+            groups.append(group)
+        return groups

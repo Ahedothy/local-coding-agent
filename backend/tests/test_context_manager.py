@@ -19,6 +19,7 @@ def test_system_user_and_assistant_messages_are_kept_in_order() -> None:
 
 def test_tool_result_becomes_a_model_tool_message() -> None:
     context = ContextManager("System")
+    call = ToolCall(id="call-1", name="read_file", arguments={"path": "main.py"})
     result = ToolResult(
         tool_call_id="call-1",
         tool_name="read_file",
@@ -26,6 +27,7 @@ def test_tool_result_becomes_a_model_tool_message() -> None:
         output={"path": "main.py", "content": "print('ok')"},
     )
 
+    context.add_assistant_message(tool_calls=[call])
     assert context.add_tool_result(result) is False
     message = context.get_messages()[-1]
     assert message == ModelMessage(
@@ -38,6 +40,7 @@ def test_tool_result_becomes_a_model_tool_message() -> None:
 
 def test_long_tool_result_is_truncated_before_context_insertion() -> None:
     context = ContextManager("System", max_tool_result_chars=40)
+    call = ToolCall(id="call-1", name="read_file", arguments={"path": "main.py"})
     result = ToolResult(
         tool_call_id="call-1",
         tool_name="read_file",
@@ -45,6 +48,7 @@ def test_long_tool_result_is_truncated_before_context_insertion() -> None:
         output={"content": "x" * 200},
     )
 
+    context.add_assistant_message(tool_calls=[call])
     assert context.add_tool_result(result) is True
     content = context.get_messages()[-1].content
     assert content is not None
@@ -76,3 +80,52 @@ def test_assistant_tool_calls_are_preserved_as_model_messages() -> None:
     message = context.get_messages()[-1]
     assert message.role == "assistant"
     assert message.tool_calls == [call]
+
+
+def test_tool_call_and_tool_result_are_kept_as_one_context_group() -> None:
+    context = ContextManager("System", max_chars=500)
+    call = ToolCall(id="call-1", name="list_files", arguments={"path": "."})
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="list_files",
+        success=True,
+        output={"files": ["main.py"]},
+    )
+
+    context.add_user_message("Inspect the project")
+    context.add_assistant_message(tool_calls=[call])
+    context.add_tool_result(result)
+
+    messages = context.get_messages()
+    assert [message.role for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert messages[-1].tool_call_id == call.id
+
+
+def test_tool_call_and_tool_result_are_removed_together_when_budget_is_too_small() -> None:
+    # The result fits by itself, but the assistant tool-call plus result does
+    # not. The old per-message truncation could therefore leave an orphan tool.
+    context = ContextManager("System", max_chars=74)
+    call = ToolCall(
+        id="call-1",
+        name="read_file",
+        arguments={"path": "a-very-long-file-name.py"},
+    )
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="read_file",
+        success=True,
+        output={"content": "result"},
+    )
+
+    context.add_user_message("Task")
+    context.add_assistant_message(tool_calls=[call])
+    context.add_tool_result(result)
+
+    messages = context.get_messages()
+    assert not any(message.role == "tool" for message in messages)
+    assert not any(message.role == "assistant" and message.tool_calls for message in messages)
