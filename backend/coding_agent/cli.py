@@ -12,7 +12,7 @@ from typing import Sequence
 from coding_agent.agent import Agent, Session
 from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
-from coding_agent.events import AgentEvent
+from coding_agent.events import AgentEvent, JsonlEventLogger
 from coding_agent.models import (
     ModelResponse,
     MockModelProvider,
@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the same Agent session for multiple user turns.",
     )
     parser.add_argument(
+        "--event-log",
+        type=Path,
+        help="Optionally append Agent events to a JSONL file.",
+    )
+    parser.add_argument(
         "task",
         nargs="?",
         help="Programming task for one-shot mode or the optional first turn.",
@@ -62,6 +67,17 @@ def print_event(event: AgentEvent) -> None:
     """Print one structured event without putting orchestration in the CLI."""
     payload = json.dumps(event.payload, ensure_ascii=False, default=str)
     print(f"[{event.type.value}] {payload}")
+
+
+def _build_event_handler(event_log: Path | None):
+    logger = JsonlEventLogger(event_log) if event_log is not None else None
+
+    def handle(event: AgentEvent) -> None:
+        print_event(event)
+        if logger is not None:
+            logger(event)
+
+    return handle
 
 
 def _build_agent(workspace: Workspace, provider, event_handler) -> Agent:
@@ -132,10 +148,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         workspace = Workspace(args.workspace)
+        event_handler = _build_event_handler(args.event_log)
         if args.provider == "mock":
-            agent = _build_mock_agent(workspace, print_event)
+            agent = _build_mock_agent(workspace, event_handler)
         else:
-            agent = _build_real_agent(workspace, print_event)
+            agent = _build_real_agent(workspace, event_handler)
         if args.interactive:
             asyncio.run(_run_interactive(agent, args.task))
             return 0
