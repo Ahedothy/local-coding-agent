@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
-from coding_agent.tools.command import COMMAND_TOOLS
+from coding_agent.tools.command import COMMAND_TOOLS, ExecuteCommandArguments
 from coding_agent.workspace import Workspace
 
 
@@ -99,3 +103,17 @@ def test_execute_command_blocks_obviously_dangerous_command(tmp_path: Path) -> N
     assert result.success is False
     assert "blocked for safety" in result.error
 
+
+def test_execute_command_accepts_json_encoded_argument_array(tmp_path: Path) -> None:
+    result = execute_command(
+        tmp_path,
+        {"command": json.dumps(python_command("print('ok')"))},
+    )
+
+    assert result.success is True
+    assert result.output["stdout"].strip() == "ok"
+
+
+def test_execute_command_still_rejects_plain_shell_string() -> None:
+    with pytest.raises(ValidationError):
+        ExecuteCommandArguments.model_validate({"command": "python -m pytest"})

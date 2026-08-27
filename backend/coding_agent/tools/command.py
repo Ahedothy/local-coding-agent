@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import BaseModel, Field, StrictStr
+from pydantic import BaseModel, Field, StrictStr, field_validator
 
 from .base import Tool, ToolContext, ToolResult
 
@@ -46,6 +47,20 @@ class ExecuteCommandArguments(BaseModel):
         gt=0,
         le=MAX_OUTPUT_CHARS,
     )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def decode_json_array(cls, value: object) -> object:
+        """Accept model-produced JSON arrays without accepting shell strings."""
+        if not isinstance(value, str):
+            return value
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("command must be a JSON array of argument strings") from exc
+        if not isinstance(decoded, list):
+            raise ValueError("command must be a JSON array of argument strings")
+        return decoded
 
 
 def _relative_path(workspace_root: Path, path: Path) -> str:
