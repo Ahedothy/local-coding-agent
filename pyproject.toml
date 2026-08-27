@@ -9,6 +9,7 @@ description = "A student-built coding agent with locally executed tools."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "openai>=1.0",
     "pydantic>=2.0",
 ]
 

@@ -41,10 +41,14 @@ def test_cli_rejects_invalid_workspace(tmp_path: Path, capsys) -> None:
     assert "Unable to start agent" in captured.err
 
 
-def test_cli_does_not_claim_real_provider_is_available(
+def test_cli_reports_missing_real_provider_configuration(
     tmp_path: Path,
     capsys,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_MODEL", "")
+    monkeypatch.chdir(tmp_path)
     exit_code = main(
         [
             "--workspace",
@@ -57,4 +61,4 @@ def test_cli_does_not_claim_real_provider_is_available(
 
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert "not implemented yet" in captured.err
+    assert "OPENAI_API_KEY is required" in captured.err

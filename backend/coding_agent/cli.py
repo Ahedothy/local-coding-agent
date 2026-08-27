@@ -10,9 +10,14 @@ from pathlib import Path
 from typing import Sequence
 
 from coding_agent.agent import Agent, Session
+from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEvent
-from coding_agent.models import ModelResponse, MockModelProvider
+from coding_agent.models import (
+    ModelResponse,
+    MockModelProvider,
+    OpenAICompatibleProvider,
+)
 from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.command import COMMAND_TOOLS
 from coding_agent.tools.edit import EDIT_TOOLS
@@ -50,14 +55,10 @@ def print_event(event: AgentEvent) -> None:
     print(f"[{event.type.value}] {payload}")
 
 
-def _build_mock_agent(workspace: Workspace, event_handler) -> Agent:
-    provider = MockModelProvider(
-        [ModelResponse(content="Mock provider completed the task without tool calls.")]
-    )
+def _build_agent(workspace: Workspace, provider, event_handler) -> Agent:
     registry = ToolRegistry((*FILESYSTEM_TOOLS, *EDIT_TOOLS, *COMMAND_TOOLS))
-    tool_context = ToolContext(session_id="pending", workspace=workspace)
     session = Session(workspace_root=workspace.root)
-    tool_context.session_id = session.session_id
+    tool_context = ToolContext(session_id=session.session_id, workspace=workspace)
     executor = ToolExecutor(registry, event_handler=event_handler)
     return Agent(
         provider,
@@ -69,21 +70,33 @@ def _build_mock_agent(workspace: Workspace, event_handler) -> Agent:
     )
 
 
+def _build_mock_agent(workspace: Workspace, event_handler) -> Agent:
+    provider = MockModelProvider(
+        [ModelResponse(content="Mock provider completed the task without tool calls.")]
+    )
+    return _build_agent(workspace, provider, event_handler)
+
+
+def _build_real_agent(workspace: Workspace, event_handler) -> Agent:
+    load_dotenv()
+    return _build_agent(
+        workspace,
+        OpenAICompatibleProvider(),
+        event_handler,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI arguments, run Agent Core, and return a process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.provider == "real":
-        print(
-            "The real model provider is not implemented yet; use --provider mock.",
-            file=sys.stderr,
-        )
-        return 2
-
     try:
         workspace = Workspace(args.workspace)
-        agent = _build_mock_agent(workspace, print_event)
+        if args.provider == "mock":
+            agent = _build_mock_agent(workspace, print_event)
+        else:
+            agent = _build_real_agent(workspace, print_event)
         result = asyncio.run(agent.run(args.task))
     except Exception as exc:
         print(f"Unable to start agent: {exc}", file=sys.stderr)
