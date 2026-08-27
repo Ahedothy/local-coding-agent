@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,15 @@ from coding_agent.context import ContextManager
 from coding_agent.models import ModelResponse, MockModelProvider
 from coding_agent.tools import ToolExecutor, ToolRegistry
 from coding_agent.workspace import Workspace
+
+
+def test_windows_api_configures_subprocess_capable_event_loop_policy() -> None:
+    if sys.platform != "win32":
+        return
+
+    policy_type = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_type is not None:
+        assert isinstance(asyncio.get_event_loop_policy(), policy_type)
 
 
 def make_factory(responses: list[ModelResponse]):

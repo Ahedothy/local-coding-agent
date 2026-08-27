@@ -10,3 +10,5 @@ env/
 htmlcov/
 event_logs/
 .pytest-*/
+frontend/node_modules/
+frontend/dist/

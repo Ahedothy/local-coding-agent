@@ -18,6 +18,14 @@ from .registry import ToolRegistry
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 
 
+def _format_execution_error(exc: Exception) -> str:
+    """Keep the exception type visible even when its message is empty."""
+    message = str(exc)
+    if message:
+        return f"tool execution failed: {message}"
+    return f"tool execution failed: {type(exc).__name__}: {exc!r}"
+
+
 class ToolExecutor:
     """Execute registered tools locally and normalize every outcome."""
 
@@ -69,7 +77,7 @@ class ToolExecutor:
             return await self._failure(
                 tool_call,
                 context,
-                f"tool execution failed: {exc}",
+                _format_execution_error(exc),
                 emit_started=False,
             )
 

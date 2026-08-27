@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import dataclass, field
 from typing import Callable
 from uuid import uuid4
@@ -24,6 +25,19 @@ SYSTEM_PROMPT = (
     "You are a local coding agent. Inspect and modify files only through the "
     "registered workspace tools."
 )
+
+
+def _configure_windows_subprocess_loop() -> None:
+    """Use the Windows loop implementation that supports asyncio subprocesses."""
+    if sys.platform != "win32":
+        return
+
+    policy_type = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_type is not None and not isinstance(asyncio.get_event_loop_policy(), policy_type):
+        asyncio.set_event_loop_policy(policy_type())
+
+
+_configure_windows_subprocess_loop()
 
 AgentFactory = Callable[[Workspace, Callable[[AgentEvent], object]], Agent]
 

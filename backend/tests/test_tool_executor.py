@@ -39,6 +39,15 @@ class RaisingTool(Tool):
         raise RuntimeError("expected failure")
 
 
+class EmptyMessageRaisingTool(Tool):
+    name = "raise_empty_error"
+    description = "Raise an exception without a message for executor testing."
+    parameters_model = EchoArguments
+
+    async def execute(self, context: ToolContext, arguments: EchoArguments) -> ToolResult:
+        raise OSError()
+
+
 def make_context(tmp_path: Path) -> ToolContext:
     return ToolContext(session_id="session-1", workspace=Workspace(tmp_path))
 
@@ -120,6 +129,24 @@ def test_executor_converts_tool_exception_to_failure(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.error == "tool execution failed: expected failure"
+
+
+def test_executor_preserves_type_for_empty_tool_exception(tmp_path: Path) -> None:
+    executor = ToolExecutor(ToolRegistry([EmptyMessageRaisingTool()]))
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(
+                id="call-1",
+                name="raise_empty_error",
+                arguments={"text": "hello"},
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is False
+    assert result.error == "tool execution failed: OSError: OSError()"
 
 
 def test_executor_emits_tool_lifecycle_events(tmp_path: Path) -> None:

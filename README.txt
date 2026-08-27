@@ -117,10 +117,38 @@ Manual Multi-Turn Verification
 6. Exit with `/exit`.
 
 The conversation is held in memory only. Closing the CLI process discards the
-conversation. SQLite, JSONL replay, Web API sessions, and React state are not
-part of this milestone. Use the real provider for manual multi-turn
+conversation. Session persistence and conversation restore are not implemented.
+Use the real provider for manual multi-turn
 verification; the CLI mock provider is a one-shot smoke-test provider, while
 multi-turn mock behavior is covered by the automated Agent Core tests.
+
+Web UI
+------
+
+The optional web interface uses the existing Agent Core through FastAPI and
+SSE. Start the backend from one PowerShell window:
+
+    cd backend
+    python -m uvicorn coding_agent.api:app --port 8000
+
+Start the React development server from a second PowerShell window:
+
+    cd frontend
+    npm install
+    npm run dev
+
+Open the URL printed by Vite, usually `http://127.0.0.1:5173/`. Enter an
+existing local workspace path, create a session, and submit a task. The page
+shows model requests, local tool calls, tool results, and the final answer.
+
+On Windows, do not start the backend with `--reload`. The reload subprocess can
+select an asyncio event loop that does not support `create_subprocess_exec`,
+which causes `execute_command` to fail with `NotImplementedError`. Restart the
+backend manually after changing Python code.
+
+The web session supports multiple user turns while the browser page and backend
+process remain alive. Refreshing the page or changing the workspace creates a
+new in-memory session.
 
 Demo Repository
 ---------------
