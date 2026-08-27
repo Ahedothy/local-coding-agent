@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "A student-built coding agent with locally executed tools."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.0",
+]
 
 [project.optional-dependencies]
 test = [
@@ -25,4 +27,3 @@ where = ["backend"]
 testpaths = ["backend/tests"]
 pythonpath = ["backend"]
 addopts = "-ra"
-
