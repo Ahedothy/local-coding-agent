@@ -164,7 +164,12 @@ Start the React development server from a second PowerShell window:
 
 Open the URL printed by Vite, usually `http://127.0.0.1:5173/`. Enter an
 existing local workspace path, create a session, and submit a task. The page
-shows model requests, local tool calls, tool results, and the final answer.
+shows a streaming conversation: the user task appears first, model and local
+tool activity is grouped into a collapsible Thinking Process, and the final
+answer is progressively revealed as the run completes. The workspace,
+conversation, and file preview are independent panes; desktop users can resize
+or collapse the side panes, while the message composer remains docked at the
+bottom of the center pane.
 
 On Windows, do not start the backend with `--reload`. The reload subprocess can
 select an asyncio event loop that does not support `create_subprocess_exec`,

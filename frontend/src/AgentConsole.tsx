@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement, ReactNode } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from "react";
 import {
+  BrainCircuit,
   Bot,
-  Check,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   CircleStop,
-  Clipboard,
   Clock3,
   Code2,
   FileWarning,
@@ -15,9 +15,11 @@ import {
   History,
   LoaderCircle,
   ListChecks,
-  Play,
   RotateCcw,
+  Send,
   Terminal,
+  UserRound,
+  Wrench,
   XCircle,
 } from "lucide-react";
 
@@ -32,7 +34,6 @@ type AgentEvent = {
 
 type SessionResponse = { session_id: string; workspace_root: string };
 type RunResponse = { run_id: string; session_id: string; status: string };
-type Filter = "all" | "model" | "tools" | "context" | "errors";
 type ContextStats = {
   total_chars?: number;
   max_chars?: number;
@@ -63,14 +64,6 @@ const eventLabels: Record<string, string> = {
   agent_error: "Agent error",
 };
 const eventTypes = Object.keys(eventLabels);
-const filters: Array<{ id: Filter; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "model", label: "Model" },
-  { id: "tools", label: "Tools" },
-  { id: "context", label: "Context" },
-  { id: "errors", label: "Errors" },
-];
-
 function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
   if (type === "plan") return "working";
@@ -100,14 +93,6 @@ function formatDuration(events: AgentEvent[]) {
   const end = new Date(events.at(-1)?.timestamp ?? events[0].timestamp).getTime();
   const seconds = Math.max(0, (end - start) / 1000);
   return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-}
-
-function eventMatchesFilter(type: string, filter: Filter) {
-  if (filter === "all") return true;
-  if (filter === "model") return type.startsWith("model") || ["assistant_message", "plan", "reflection"].includes(type);
-  if (filter === "tools") return type.startsWith("tool");
-  if (filter === "context") return type.startsWith("context");
-  return type === "agent_error" || type === "tool_failed";
 }
 
 function readPayloadString(event: AgentEvent, key: string) {
@@ -199,17 +184,22 @@ export default function AgentConsole() {
   const [run, setRun] = useState<RunResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
-  const [selectedEvent, setSelectedEvent] = useState<AgentEvent | null>(null);
-  const [copied, setCopied] = useState(false);
   const [workspaceExpanded, setWorkspaceExpanded] = useState(true);
   const [historyExpanded, setHistoryExpanded] = useState(true);
+  const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("idle");
+  const [displayedAnswer, setDisplayedAnswer] = useState("");
+  const [answerStreaming, setAnswerStreaming] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [leftWidth, setLeftWidth] = useState(270);
+  const [rightWidth, setRightWidth] = useState(310);
   const eventSource = useRef<EventSource | null>(null);
   const refreshInFlight = useRef(false);
   const selectedFilePathRef = useRef<string | null>(null);
   const previewRequestIdRef = useRef(0);
+  const conversationRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => () => eventSource.current?.close(), []);
 
@@ -218,25 +208,28 @@ export default function AgentConsole() {
     return candidate?.payload.context as ContextStats | undefined;
   }, [events]);
   const finalAnswer = useMemo(() => {
-    const event = [...events].reverse().find((candidate) => candidate.type === "assistant_message" && readPayloadString(candidate, "content"));
+    const event = [...events].reverse().find((candidate) => candidate.type === "assistant_message" && candidate.payload.tool_call_count === 0 && readPayloadString(candidate, "content"));
     return event ? readPayloadString(event, "content") : undefined;
   }, [events]);
-  const latestPlan = useMemo(() => {
-    const event = [...events].reverse().find((candidate) => candidate.type === "plan" && readPayloadString(candidate, "content"));
-    return event ? readPayloadString(event, "content") : undefined;
-  }, [events]);
+  const userMessages = useMemo(() => events.filter((event) => event.type === "user_message"), [events]);
+  const thinkingEvents = useMemo(() => events.filter((event) => [
+    "iteration_started",
+    "model_request",
+    "model_response",
+    "plan",
+    "reflection",
+    "tool_started",
+    "tool_finished",
+    "tool_failed",
+    "context_truncated",
+    "context_compacted",
+    "agent_error",
+  ].includes(event.type)), [events]);
   const runStatus = useMemo(() => {
+    if (!session) return "workspace-required";
     const finished = [...events].reverse().find((event) => event.type === "agent_finished");
     return readPayloadString(finished ?? events[0] ?? { payload: {} } as AgentEvent, "status") ?? (busy ? "running" : "ready");
   }, [busy, events]);
-  const groupedEvents = useMemo(() => {
-    const groups = new Map<number | null, AgentEvent[]>();
-    for (const event of events.filter((candidate) => eventMatchesFilter(candidate.type, filter))) {
-      const key = event.iteration;
-      groups.set(key, [...(groups.get(key) ?? []), event]);
-    }
-    return [...groups.entries()];
-  }, [events, filter]);
   const iterationCount = new Set(events.map((event) => event.iteration).filter((iteration): iteration is number => iteration !== null)).size;
   const toolCallCount = events.filter((event) => event.type === "tool_started").length;
   const failedToolCount = events.filter((event) => event.type === "tool_failed").length;
@@ -249,6 +242,33 @@ export default function AgentConsole() {
       return [];
     }
   }, [events.length, session]);
+
+  useEffect(() => {
+    const answer = finalAnswer ?? "";
+    if (!answer) {
+      setDisplayedAnswer("");
+      setAnswerStreaming(false);
+      return;
+    }
+    setDisplayedAnswer("");
+    setAnswerStreaming(true);
+    let cursor = 0;
+    const timer = window.setInterval(() => {
+      cursor = Math.min(answer.length, cursor + Math.max(1, Math.ceil(answer.length / 90)));
+      setDisplayedAnswer(answer.slice(0, cursor));
+      if (cursor >= answer.length) {
+        window.clearInterval(timer);
+        setAnswerStreaming(false);
+      }
+    }, 16);
+    return () => window.clearInterval(timer);
+  }, [finalAnswer]);
+
+  useEffect(() => {
+    if (!events.length && !displayedAnswer) return;
+    const container = conversationRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [events.length, displayedAnswer]);
 
   async function responseError(response: Response, fallback: string) {
     try {
@@ -277,25 +297,28 @@ export default function AgentConsole() {
   }
 
   async function runTask() {
-    if (!session || !task.trim()) return;
+    const submittedTask = task.trim();
+    if (!session || !submittedTask) return;
     setError(null);
     setEvents([]);
-    setSelectedEvent(null);
+    setDisplayedAnswer("");
+    setAnswerStreaming(false);
+    setThinkingExpanded(true);
     setBusy(true);
     eventSource.current?.close();
     try {
-      const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: task.trim() }) });
+      const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask }) });
       if (!response.ok) throw new Error(await responseError(response, "Could not start run"));
       const started = (await response.json()) as RunResponse;
-      const nextHistory = [{ task: task.trim(), timestamp: new Date().toISOString() }, ...history.filter((item) => item.task !== task.trim())].slice(0, 8);
+      const nextHistory = [{ task: submittedTask, timestamp: new Date().toISOString() }, ...history.filter((item) => item.task !== submittedTask)].slice(0, 8);
       localStorage.setItem("lvyiyou-agent-history", JSON.stringify(nextHistory));
+      setTask("");
       setRun(started);
       const source = new EventSource(`${API_BASE}/runs/${started.run_id}/events`);
       eventSource.current = source;
       const handleEvent = (message: Event) => {
         const event = JSON.parse((message as MessageEvent<string>).data) as AgentEvent;
         setEvents((current) => [...current, event]);
-        setSelectedEvent(event);
         if (["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
           void loadWorkspaceFiles(started.session_id).catch((reason) => {
             setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
@@ -332,22 +355,16 @@ export default function AgentConsole() {
     }
   }
 
-  async function copySelectedEvent() {
-    if (!selectedEvent) return;
-    await navigator.clipboard.writeText(JSON.stringify(selectedEvent.payload, null, 2));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
-  }
-
   function resetSession() {
     eventSource.current?.close();
     setSession(null);
     setRun(null);
     setEvents([]);
-    setSelectedEvent(null);
     setTask("");
     setError(null);
     setBusy(false);
+    setDisplayedAnswer("");
+    setAnswerStreaming(false);
     setWorkspaceFiles([]);
     setExpandedFolders(new Set());
     setSelectedFilePath(null);
@@ -454,6 +471,23 @@ export default function AgentConsole() {
     </div>;
   }
 
+  function resizePane(side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = side === "left" ? leftWidth : rightWidth;
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = moveEvent.clientX - startX;
+      if (side === "left") setLeftWidth(Math.min(420, Math.max(220, startWidth + delta)));
+      else setRightWidth(Math.min(420, Math.max(220, startWidth - delta)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
+
   useEffect(() => {
     if (!session || !busy) return;
     const timer = window.setInterval(() => {
@@ -462,44 +496,56 @@ export default function AgentConsole() {
     return () => window.clearInterval(timer);
   }, [busy, session]);
 
+  const layoutStyle = {
+    "--left-pane-width": leftCollapsed ? "38px" : `${leftWidth}px`,
+    "--right-pane-width": rightCollapsed ? "38px" : `${rightWidth}px`,
+  } as CSSProperties;
+
   return <div className="console-shell">
     <header className="console-topbar">
       <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">Self-hosted runtime console</p></div></div>
-      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "Run in progress" : session ? "Session ready" : "Awaiting workspace"}</div>
+      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "Run in progress" : session ? "Session ready" : "Workspace required"}</div>
     </header>
 
-    <main className="console-layout">
-      <aside className="command-rail" aria-label="Workspace and run controls">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-kicker">Workspace</span><span className="toggle-mark">{workspaceExpanded ? "-" : "+"}</span></button><button className="icon-button" onClick={resetSession} title="Change workspace" aria-label="Change workspace" disabled={!session}><RotateCcw size={15} /></button></div>{workspaceExpanded && <><h1>Local workspace</h1>
+    <main className="console-layout" style={layoutStyle}>
+      {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Workspace panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show workspace" aria-label="Show workspace"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Workspace and run controls">
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-kicker">Workspace</span><span className="toggle-mark">{workspaceExpanded ? "-" : "+"}</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={resetSession} title="Change workspace" aria-label="Change workspace" disabled={!session}><RotateCcw size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <><h1>Local workspace</h1>
         {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><LoaderCircle className="spin" size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading workspace...</> : <><FolderOpen size={16} />Choose folder</>}</button> : <div className="session-bar"><span title={session.workspace_root}>{workspaceRoot || session.workspace_root}</span></div>}
         {workspacePhase !== "idle" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{workspacePhase === "selecting" ? "Selecting a local folder..." : "Scanning local workspace..."}</span></div>}
         {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} files · {workspaceFiles.filter((entry) => entry.kind === "directory").length} folders</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">Showing first 120 entries</div>}</div>}
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
         </>}</div>
         <div className="rail-section history-section"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-kicker"><History size={12} />Recent tasks</span><span className="toggle-mark">{historyExpanded ? "-" : "+"}</span></button>{historyExpanded && <>{history.length === 0 ? <p className="history-empty">Completed tasks will appear here.</p> : <div className="history-list">{history.map((item) => <button className="history-item" key={`${item.timestamp}-${item.task}`} onClick={() => setTask(item.task)}><span>{item.task}</span><time>{new Date(item.timestamp).toLocaleDateString()}</time></button>)}</div>}</>}</div>
-      </aside>
+      </aside>}
+      <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"><span className="resizer-handle" /></div>
 
-      <section className="trace-workbench" aria-label="Agent activity">
-        <div className="workbench-heading"><div><div className="section-kicker">Run monitor</div><h2>Agent activity</h2><p className="run-id">{run ? `run ${run.run_id.slice(0, 8)}` : "No active run"}</p></div><div className={`status-chip status-${runStatus}`}><span className="status-chip-dot" />{runStatus}</div></div>
-        <div className="metric-strip">
+      <section className="trace-workbench" aria-label="Agent conversation">
+        <div className="workbench-heading"><div><div className="section-kicker">Conversation</div><h2>Agent workspace</h2><p className="run-id">{run ? `run ${run.run_id.slice(0, 8)}` : session ? "Start a task to begin" : "Choose a workspace to begin"}</p></div><div className={`status-chip status-${runStatus}`}><span className="status-chip-dot" />{session ? runStatus : "workspace required"}</div></div>
+        <div className="metric-strip compact-metrics">
           <div><span className="metric-label">Duration</span><strong><Clock3 size={14} />{formatDuration(events)}</strong></div>
           <div><span className="metric-label">Iterations</span><strong>{iterationCount || "--"}</strong></div>
-          <div><span className="metric-label">Tool calls</span><strong>{toolCallCount || "--"}</strong></div>
+          <div><span className="metric-label">Tools</span><strong>{toolCallCount || "--"}</strong></div>
           <div><span className="metric-label">Failures</span><strong className={failedToolCount ? "metric-danger" : ""}>{failedToolCount || "--"}</strong></div>
           <div className="metric-context"><span className="metric-label">Context budget</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div>
         </div>
-        {latestPlan && <div className="plan-panel"><div className="plan-heading"><ListChecks size={16} /><span>Current plan</span><span>Latest model plan</span></div><p>{latestPlan}</p></div>}
-        {finalAnswer && !busy && <div className="answer-panel"><div className="answer-heading"><CheckCircle2 size={16} />Final answer</div><p>{finalAnswer}</p></div>}
-        <div className="filter-bar" role="tablist" aria-label="Event filters">{filters.map((item) => <button key={item.id} className={`filter-tab ${filter === item.id ? "is-active" : ""}`} onClick={() => setFilter(item.id)} role="tab" aria-selected={filter === item.id}>{item.label}<span>{item.id === "all" ? events.length : events.filter((event) => eventMatchesFilter(event.type, item.id)).length}</span></button>)}</div>
-        <div className="trace-grid">
-          <div className="iteration-list">{groupedEvents.length === 0 ? <div className="empty-trace"><div className="empty-icon"><Terminal size={19} /></div><h3>{events.length ? "No matching events" : "Ready when you are"}</h3><p>{events.length ? "Change the filter to inspect another part of the run." : "Open a workspace and run a task to see the model-to-tool loop here."}</p></div> : groupedEvents.map(([iteration, group]) => <section className="iteration-block" key={iteration ?? "session"}><div className="iteration-heading"><span>{iteration === null ? "Session" : `Iteration ${iteration}`}</span><span>{group.length} events</span></div>{group.map((event) => <button className={`event-row tone-${eventTone(event.type)} ${selectedEvent?.event_id === event.event_id ? "is-selected" : ""}`} key={event.event_id} onClick={() => setSelectedEvent(event)}><span className="event-icon">{iconForEvent(event.type)}</span><span className="event-main"><span className="event-title"><strong>{eventLabels[event.type] ?? event.type}</strong><time>{formatTime(event.timestamp)}</time></span>{event.type.startsWith("tool_") && <span className="tool-name">{String(event.payload.tool_name ?? "local tool")}</span>}{["assistant_message", "plan", "reflection"].includes(event.type) && readPayloadString(event, "content") && <span className="event-preview">{readPayloadString(event, "content")}</span>}{(event.type === "tool_failed" || event.type === "agent_error") && readPayloadString(event, "error") && <span className="event-preview">{readPayloadString(event, "error")}</span>}</span></button>)}</section>)}</div>
-          <aside className="event-inspector"><div className="inspector-heading"><div><div className="section-kicker">Inspector</div><h3>{selectedEvent ? eventLabels[selectedEvent.type] ?? selectedEvent.type : "Select an event"}</h3></div>{selectedEvent && <button className="icon-button" onClick={copySelectedEvent} title="Copy event payload" aria-label="Copy event payload">{copied ? <Check size={15} /> : <Clipboard size={15} />}</button>}</div>{selectedEvent ? <><div className="inspector-meta"><span>{formatTime(selectedEvent.timestamp)}</span><span>{selectedEvent.iteration === null ? "session" : `iteration ${selectedEvent.iteration}`}</span></div><pre>{JSON.stringify(selectedEvent.payload, null, 2)}</pre></> : <div className="inspector-empty"><Code2 size={18} /><p>Event payloads and execution details appear here.</p></div>}</aside>
+
+        <div className="conversation-scroll" ref={conversationRef} aria-live="polite">
+          {userMessages.map((event) => <article className="chat-message user-message" key={event.event_id}><div className="message-avatar user-avatar"><UserRound size={16} /></div><div className="message-body"><div className="message-meta"><strong>You</strong><time>{formatTime(event.timestamp)}</time></div><p>{readPayloadString(event, "content")}</p></div></article>)}
+          {thinkingEvents.length > 0 && <details className="thinking-card" open={thinkingExpanded} onToggle={(event) => setThinkingExpanded(event.currentTarget.open)}><summary><span className="thinking-summary-main"><span className="thinking-avatar"><BrainCircuit size={16} /></span><span><strong>Thinking process</strong><small>{busy ? (typeof activeTool === "string" ? `Working with ${activeTool}` : "Agent is working") : `${thinkingEvents.length} execution steps`}</small></span></span><span className="thinking-summary-state">{busy ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}</span></summary><div className="thinking-steps">{thinkingEvents.map((event) => <div className={`thinking-step tone-${eventTone(event.type)}`} key={event.event_id}><span className="thinking-step-icon">{event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{event.type === "tool_started" ? String(event.payload.tool_name ?? "local tool") : eventLabels[event.type] ?? event.type}</strong><time>{formatTime(event.timestamp)}</time></div><p>{event.type === "plan" || event.type === "reflection" ? readPayloadString(event, "content") : event.type === "tool_failed" || event.type === "agent_error" ? readPayloadString(event, "error") : event.type === "tool_finished" ? "Completed locally" : event.type === "tool_started" ? "Running locally" : event.type === "model_response" ? `${String(event.payload.tool_call_count ?? 0)} tool call(s) returned` : event.type === "model_request" ? `${String(event.payload.message_count ?? 0)} messages sent to model` : event.type.startsWith("context_") ? "Context updated" : event.type === "iteration_started" ? `Iteration ${event.iteration ?? "-"} started` : "Agent state updated"}</p><details className="thinking-payload"><summary>Details</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></div></div>)}</div></details>}
+          {(displayedAnswer || finalAnswer) && <article className="chat-message agent-message"><div className="message-avatar agent-avatar"><Bot size={16} /></div><div className="message-body"><div className="message-meta"><strong>Agent</strong><time>{answerStreaming ? "streaming" : "final answer"}</time></div><div className="answer-copy">{displayedAnswer}<span className={`answer-cursor ${answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div></div></article>}
+          {busy && !finalAnswer && <div className="typing-row"><span className="typing-avatar"><Bot size={15} /></span><span>Agent is thinking</span><i /><i /><i /></div>}
+          {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a workspace first</h3><p>Select a real local folder to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><LoaderCircle className="spin" size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading workspace...</> : <><FolderOpen size={14} />Choose folder</>}</button></div>}
+          {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>Ready when you are</h3><p>Send a task and follow the Agent from intent to local tools to final answer.</p></div>}
+          {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
+
         {busy && typeof activeTool === "string" && <div className="activity-footer"><LoaderCircle className="spin" size={14} />Working with <strong>{activeTool}</strong></div>}
         {contextStats?.compaction_count ? <div className="context-status">Memory compression active - {contextStats.compaction_count} compaction{contextStats.compaction_count === 1 ? "" : "s"}</div> : null}
-        <div className="conversation-composer"><label className="field-label" htmlFor="task-upgraded">Message the agent</label><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void runTask(); }} placeholder="Ask the agent to inspect, edit, and verify your workspace..." rows={3} disabled={!session || busy} /><div className="composer-actions"><span>Ctrl + Enter to run</span><div className="task-actions"><button className="button button-primary" onClick={runTask} disabled={!session || !task.trim() || busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{busy ? "Running" : "Run task"}</button><button className="button button-quiet" onClick={cancelRun} disabled={!busy}><CircleStop size={16} />Cancel</button></div></div>{error && <div className="error-banner"><XCircle size={15} />{error}</div>}</div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><label className="field-label" htmlFor="task-upgraded">Message the agent</label><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void runTask(); }} placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy} /><div className="composer-actions"><span>{session ? "Ctrl + Enter to send" : "Workspace required"}</span><div className="task-actions"><button className="button button-primary" onClick={runTask} disabled={!session || !task.trim() || busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}{busy ? "Running" : "Send"}</button><button className="button button-quiet" onClick={cancelRun} disabled={!busy}><CircleStop size={16} />Cancel</button></div></div></div>
       </section>
-      <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">Workspace file</div><h3>{filePreview?.path ?? selectedFilePath ?? "Preview"}</h3></div>{previewState === "unsupported" || previewState === "error" ? <FileWarning size={17} /> : <FileCode2 size={17} />}</div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>
+
+      <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="Resize preview panel"><span className="resizer-handle" /></div>
+      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="File preview collapsed"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="Show preview" aria-label="Show preview"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">Workspace file</div><h3>{filePreview?.path ?? selectedFilePath ?? "Preview"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="Hide preview panel" aria-label="Hide preview panel"><ChevronRight size={15} /></button>{previewState === "unsupported" || previewState === "error" ? <FileWarning size={17} /> : <FileCode2 size={17} />}</span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>}
     </main>
     <footer className="footer-bar"><span>Agent Core stays on the backend</span><span>FastAPI · SSE · local tools</span></footer>
   </div>;

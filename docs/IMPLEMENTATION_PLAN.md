@@ -811,6 +811,23 @@ Do not:
 - build a complex code editor
 - put Agent logic in the frontend
 
+Current UI completion notes:
+
+- the center pane is a conversation stream backed by the existing SSE event
+  transport
+- model requests, plans, reflections, tool calls, tool results, context
+  changes, and failures are rendered inside a collapsible Thinking Process
+- the final assistant answer is progressively revealed after its SSE event
+  arrives
+- the workspace, conversation, and preview panes have independent scrolling;
+  desktop side panes can be resized with thin separators or collapsed from
+  their own title bars, leaving restore strips when collapsed
+- the message composer remains outside the conversation scroll area and stays
+  at the bottom of the center pane
+- before a Workspace is selected, the center pane shows a dedicated
+  workspace-required state and keeps the composer disabled so no local tool
+  session can start without a real Workspace
+
 ## Recommended Commit History
 
 1. `chore: scaffold project structure`

@@ -213,17 +213,21 @@ Recommended effort:
 
 ### Status: Implemented
 
-The Web UI now presents an operational run console centered on the Agent loop:
+The Web UI now presents a conversation-first run console centered on the Agent
+loop:
 
-- events are grouped by iteration rather than shown as one undifferentiated list
-- the run header shows status, run id, duration, iterations, tool calls, failures,
-  and context budget utilization
-- event filters cover All, Model, Tools, Context, and Errors
-- selecting an event opens a payload inspector with a copy action
-- assistant final answers, active tools, context compaction, empty states, and
-  failure states have dedicated visual treatments
-- the layout remains usable on narrow screens by stacking the inspector below
-  the event list
+- user messages, the live Thinking Process, tool steps, and the final Agent
+  answer are rendered as a chat-like stream
+- every SSE event is appended immediately, so model requests, plans, tool
+  execution, context updates, and failures remain visible while the run is in
+  progress
+- tool calls and other execution details are grouped into a collapsible
+  Thinking Process instead of competing with the final answer as raw rows
+- the final answer is progressively revealed with a streaming cursor after its
+  assistant event arrives
+- the run header shows status, run id, duration, iterations, tool calls,
+  failures, and context budget utilization
+- the layout remains usable on narrow screens by stacking the three panes
 - the main shell uses a light three-pane layout with a collapsible workspace
   tree and recent-task history on the left, the conversation/run monitor in the
   center, and file preview on the right
@@ -245,6 +249,20 @@ thread, rendering the tree before the first file preview is loaded, and using
 a short in-flight guarded polling interval during active runs. The frontend
 renders a nested flat-row tree with collapsed folders and folder-first sorting
 at each level.
+
+The three desktop panes are independently bounded: the center conversation has
+its own vertical scroll area while the workspace and file preview panes keep
+their local scroll state. Each side pane has its own collapse control in its
+title bar; after collapsing, a narrow restore strip remains visible. Their
+widths can be adjusted with the thin draggable separators. The composer is
+outside the conversation scroll area and stays docked at the bottom of the
+center pane.
+
+When no Workspace has been selected, the center pane enters an explicit
+workspace-required state. The composer is visible but disabled, and no Agent
+session or local tool call can start. This is intentional: the current Agent
+Core binds every session and tool execution to a real local Workspace rather
+than silently creating a temporary directory or an ambiguous tool context.
 
 Implementation is split into `frontend/src/AgentConsole.tsx` and the existing
 stylesheet. TypeScript validation passes with `frontend/node_modules/.bin/tsc.cmd
@@ -277,8 +295,13 @@ Visual direction:
 
 Acceptance criteria:
 
-- A viewer can understand the agent loop without reading backend logs.
-- Long tool outputs do not overwhelm the page.
+- A viewer can follow a run as a conversation without reading backend logs.
+- Tool activity is visible as a collapsible thinking process and does not hide
+  the final answer.
+- Long conversations scroll in the center pane without moving the composer.
+- Left and right panes can be collapsed from their own title bars and resized
+  with the thin separators on desktop.
+- The no-Workspace state clearly explains why the composer is disabled.
 - Errors, cancellations, context truncation, and final completion are visually distinct.
 - `npm run build` succeeds.
 
