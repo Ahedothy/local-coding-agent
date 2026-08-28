@@ -2,6 +2,8 @@
 
 from .base import Tool, ToolContext, ToolResult
 from .command import ExecuteCommandTool
+from .approval import ApprovalGate
+from .changes import ChangeStore
 from .edit import ApplyPatchTool, ReplaceInFileTool
 from .executor import ToolExecutor
 from .inspection import GitDiffTool, GetFileInfoTool, ListDirectoryTreeTool
@@ -19,4 +21,6 @@ __all__ = [
     "ToolExecutor",
     "ToolRegistry",
     "ToolResult",
+    "ApprovalGate",
+    "ChangeStore",
 ]

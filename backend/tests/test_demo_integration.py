@@ -108,7 +108,10 @@ def test_demo_agent_reads_tests_edits_code_and_retests(tmp_path: Path) -> None:
     )
 
     assert result.status == SessionStatus.COMPLETED
-    assert result.final_answer == "Fixed both calculator edge cases; all tests pass."
+    assert result.final_answer is not None
+    assert result.final_answer.startswith("Fixed both calculator edge cases; all tests pass.")
+    assert "## Changes" in result.final_answer
+    assert "diff --git a/calculator.py b/calculator.py" in result.final_answer
     assert result.tool_calls == 6
     assert "raise ValueError(\"cannot divide by zero\")" in (
         workspace_root / "calculator.py"

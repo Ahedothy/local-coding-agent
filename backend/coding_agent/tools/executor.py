@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,8 @@ from coding_agent.events import AgentEvent, AgentEventType
 from coding_agent.models import ToolCall
 
 from .base import ToolContext, ToolResult
+from .approval import ApprovalGate
+from .changes import ChangeStore
 from .registry import ToolRegistry
 
 
@@ -34,9 +37,13 @@ class ToolExecutor:
         self,
         registry: ToolRegistry,
         event_handler: EventHandler | None = None,
+        approval_gate: ApprovalGate | None = None,
+        change_store: ChangeStore | None = None,
     ) -> None:
         self.registry = registry
         self.event_handler = event_handler
+        self.approval_gate = approval_gate
+        self.change_store = change_store
 
     async def execute(self, tool_call: ToolCall, context: ToolContext) -> ToolResult:
         """Validate and execute one model-produced tool call."""
@@ -58,6 +65,67 @@ class ToolExecutor:
                 f"invalid arguments: {exc}",
                 emit_started=False,
             )
+
+        if self.approval_gate is not None and self.approval_gate.requires_approval(tool_call.name):
+            approval = self.approval_gate.create(tool_call, context, arguments)
+            approval_scope = self.approval_gate.auto_approval_scope(context.turn_id)
+            automatically_approved = approval_scope is not None
+            await self._emit(
+                AgentEvent(
+                    type=AgentEventType.APPROVAL_REQUESTED,
+                    session_id=context.session_id,
+                    payload={
+                        **approval.as_event_payload(),
+                        "automatic": automatically_approved,
+                        "approval_scope": approval_scope or "single_action",
+                    },
+                )
+            )
+            if automatically_approved:
+                self.approval_gate.discard(approval.approval_id)
+                decision = "approved"
+            else:
+                decision = await self.approval_gate.wait(
+                    approval,
+                    context.cancellation_token,
+                )
+            if decision == "cancelled":
+                self.approval_gate.discard(approval.approval_id)
+                raise asyncio.CancelledError
+            await self._emit(
+                AgentEvent(
+                    type=AgentEventType.APPROVAL_RESOLVED,
+                    session_id=context.session_id,
+                    payload={
+                        **approval.as_event_payload(),
+                        "decision": decision,
+                        "automatic": automatically_approved,
+                        "approval_scope": approval_scope
+                        or ("current_turn" if approval.approved_for_turn else "single_action"),
+                    },
+                )
+            )
+            if decision != "approved":
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    success=False,
+                    error="operation rejected by user",
+                    output={"approval_id": approval.approval_id, "decision": decision},
+                    metadata={"approval_id": approval.approval_id, "decision": decision},
+                )
+
+        snapshot = None
+        if self.change_store is not None:
+            try:
+                snapshot = self.change_store.capture(tool_call.name, arguments, context)
+            except Exception as exc:
+                return await self._failure(
+                    tool_call,
+                    context,
+                    f"could not prepare edit snapshot: {exc}",
+                    emit_started=False,
+                )
 
         await self._emit(
             AgentEvent(
@@ -84,6 +152,14 @@ class ToolExecutor:
                 duration_seconds=time.monotonic() - started_at,
             )
 
+        if self.change_store is not None:
+            normalized = self.change_store.record(
+                context,
+                tool_call.name,
+                snapshot,
+                normalized,
+            )
+
         duration_seconds = time.monotonic() - started_at
         if normalized.success:
             await self._emit(
@@ -95,6 +171,7 @@ class ToolExecutor:
                         "tool_call_id": tool_call.id,
                         "success": True,
                         "output": normalized.output,
+                        "metadata": normalized.metadata,
                         "duration_seconds": duration_seconds,
                     },
                 )
@@ -108,6 +185,11 @@ class ToolExecutor:
                 duration_seconds=duration_seconds,
             )
         return normalized
+
+    def finish_turn(self, turn_id: str | None) -> None:
+        """Release any turn-scoped approval after the Agent turn completes."""
+        if self.approval_gate is not None:
+            self.approval_gate.finish_turn(turn_id)
 
     async def _failure(
         self,

@@ -101,6 +101,25 @@ def test_replace_in_file_honors_expected_replacement_count(tmp_path: Path) -> No
     assert path.read_bytes() == b"value = 2\nvalue = 2\n"
 
 
+def test_replace_in_file_accepts_lf_match_for_crlf_file_and_preserves_style(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.c"
+    path.write_bytes(b"int main(void) {\r\n    return 0;\r\n}\r\n")
+
+    result = execute_edit(
+        tmp_path,
+        {
+            "path": "main.c",
+            "old_text": "int main(void) {\n    return 0;\n}",
+            "new_text": "int main(void) {\n    puts(\"hello\");\n}",
+        },
+    )
+
+    assert result.success is True
+    assert path.read_bytes() == b"int main(void) {\r\n    puts(\"hello\");\r\n}\r\n"
+
+
 def test_replace_in_file_rejects_binary_files(tmp_path: Path) -> None:
     (tmp_path / "data.bin").write_bytes(b"before\x00after")
 
@@ -180,6 +199,142 @@ def test_apply_patch_applies_multiple_standard_hunks_to_one_file(tmp_path: Path)
     assert result.success is True
     assert path.read_text(encoding="utf-8") == "value = 2\nstatus = 'new'\n"
     assert result.output["diff_summary"]["hunks"] == 2
+
+
+def test_apply_patch_rejects_header_only_patch_without_touching_file(tmp_path: Path) -> None:
+    path = tmp_path / "fib.c"
+    original = "#include <stdio.h>\n\nint main(void) {\n    return 0;\n}\n"
+    path.write_text(original, encoding="utf-8")
+    patch = """--- a/fib.c
++++ b/fib.c
+"""
+
+    result = execute_patch(tmp_path, {"patch": patch})
+
+    assert result.success is False
+    assert "unified diff contains no hunks for fib.c" in result.error
+    assert "@@ hunk" in result.error
+    assert result.output["touched_files"] == []
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_apply_patch_normalizes_wrong_hunk_counts_before_applying(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.c"
+    path.write_text("one\nkeep\ntwo\n", encoding="utf-8")
+    patch = """--- a/main.c
++++ b/main.c
+@@ -1,5 +1,6 @@
+-one
++ONE
+ keep
+@@ -3,4 +3,5 @@
+-two
++TWO
+"""
+
+    result = execute_patch(tmp_path, {"patch": patch})
+
+    assert result.success is True
+    assert path.read_text(encoding="utf-8") == "ONE\nkeep\nTWO\n"
+    assert result.output["diff_summary"]["hunks"] == 2
+    assert result.output["normalized_hunks"] == [
+        {
+            "path": "main.c",
+            "hunk": 1,
+            "declared_old_count": 5,
+            "declared_new_count": 6,
+            "old_count": 2,
+            "new_count": 2,
+        },
+        {
+            "path": "main.c",
+            "hunk": 2,
+            "declared_old_count": 4,
+            "declared_new_count": 5,
+            "old_count": 1,
+            "new_count": 1,
+        },
+    ]
+
+
+def test_apply_patch_recovers_unique_context_when_line_numbers_drift(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.c"
+    path.write_bytes(
+        b'#include <stdio.h>\r\n\r\n'
+        b'int main(void) {\r\n'
+        b'printf("helloworld\\n");\r\n\r\n'
+        b'    return 0;\r\n'
+        b'}\r\n'
+    )
+    patch = r'''--- a/main.c
++++ b/main.c
+@@ -2,2 +2,1 @@
+ int main(void) {
+-printf("helloworld\n");
+@@ -8,1 +8,2 @@
+ }
++printf("byebye \n");
+'''
+
+    result = execute_patch(tmp_path, {"patch": patch})
+
+    assert result.success is True
+    assert path.read_bytes() == (
+        b'#include <stdio.h>\r\n\r\n'
+        b'int main(void) {\r\n\r\n'
+        b'    return 0;\r\n'
+        b'}\r\n'
+        b'printf("byebye \\n");\r\n'
+    )
+
+
+def test_apply_patch_rejects_ambiguous_context_instead_of_guessing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.c"
+    original = "value = 1\nvalue = 1\n"
+    path.write_text(original, encoding="utf-8")
+    patch = """--- a/main.c
++++ b/main.c
+@@ -99,1 +99,1 @@
+-value = 1
++value = 2
+"""
+
+    result = execute_patch(tmp_path, {"patch": patch})
+
+    assert result.success is False
+    assert "ambiguous" in result.error
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_apply_patch_rejects_overlapping_hunks_after_normalizing_counts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.c"
+    original = "int main(void) {\n    return 0;\n}\n"
+    path.write_text(original, encoding="utf-8")
+    patch = """--- a/main.c
++++ b/main.c
+@@ -1,5 +1,6 @@
+ int main(void) {
+-    return 0;
++    puts(\"hello\");
+ }
+@@ -2,1 +2,1 @@ int main(void) {
+-    return 0;
++    return 0;
+"""
+
+    result = execute_patch(tmp_path, {"patch": patch})
+
+    assert result.success is False
+    assert "context mismatch near old line 2" in result.error
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_apply_patch_rejects_stale_hunk_without_writing_any_file(tmp_path: Path) -> None:

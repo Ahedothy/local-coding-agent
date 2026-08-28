@@ -19,6 +19,7 @@ class ToolContext:
     workspace: Workspace
     config: Any = None
     cancellation_token: Any = None
+    turn_id: str | None = None
 
 
 class ToolResult(BaseModel):
@@ -65,4 +66,3 @@ class Tool(ABC):
         arguments: BaseModel,
     ) -> ToolResult:
         """Execute validated arguments locally."""
-

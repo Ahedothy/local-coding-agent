@@ -15,7 +15,7 @@ from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEvent
 from coding_agent.models import OpenAICompatibleProvider
-from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
+from coding_agent.tools import ApprovalGate, ChangeStore, ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.command import COMMAND_TOOLS
 from coding_agent.tools.edit import EDIT_TOOLS
 from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
@@ -27,11 +27,34 @@ SYSTEM_PROMPT = (
     "registered workspace tools. Use execute_command with an argument array, "
     "not a shell string. On Windows, run workspace-local executables with "
     ".\\program.exe. Treat a command as successful only when the tool result "
-    "has success=true, returncode=0, and the expected stdout is present. Use "
-    "replace_in_file for one simple exact replacement. Use apply_patch for "
-    "related multi-line or multi-file edits; provide a standard unified diff "
+    "has success=true, returncode=0, and the expected stdout is present. "
+    "Choose the editing tool deliberately: use replace_in_file only for one "
+    "small contiguous exact replacement, usually one line or short snippet. "
+    "For edits affecting two or more lines, multiple locations, code structure, "
+    "or multiple files, prefer apply_patch. Provide a standard unified diff "
     "with ---/+++ file headers and @@ hunks, after reading the current files. "
-    "Do not guess when patch context does not match. For non-trivial tasks, "
+    "Copy source lines exactly from the latest read_file content; do not copy "
+    "UI line numbers, Markdown emphasis, or code-fence markers into the patch. "
+    "Assemble the complete patch before invoking apply_patch; never send only "
+    "file headers or a partial hunk. For separate changes in one file, include "
+    "all complete hunks in the same call. "
+    "Order hunks from top to bottom using line numbers from the original file, "
+    "not line numbers after earlier hunks are applied. "
+    "For every hunk, make the old/new line counts exactly match the following "
+    "context, removed, and added lines. Count each hunk explicitly: old count "
+    "equals context lines plus removed lines, and new count equals context lines "
+    "plus added lines; even a blank context line must start with one space. If "
+    "apply_patch fails, never resend the same patch; read the file again and "
+    "regenerate it. Only use replace_in_file as a fallback when the requested "
+    "change is truly one small contiguous exact replacement. Never call "
+    "apply_patch with only ---/+++ file "
+    "headers: every file entry must contain at least one complete @@ hunk with "
+    "actual context, removed, or added lines. If there is no complete hunk, do "
+    "not call apply_patch; reread the file and regenerate it. When patch context "
+    "does not match, reread the file and regenerate the hunk. "
+    "After a requested verification command succeeds, summarize the result and "
+    "finish instead of repeating the same verification. "
+    "For non-trivial tasks, "
     "state a concise 1-3 bullet plan in assistant text before the first tool "
     "call. After tool results, briefly state the next adjustment when useful; "
     "simple tasks may proceed directly. Never claim a tool result you did not "
@@ -97,6 +120,8 @@ class SessionRecord:
     session_id: str
     workspace: Workspace
     agent: Agent
+    approval_gate: ApprovalGate
+    change_store: ChangeStore
     current_run: RunRecord | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -123,22 +148,34 @@ class ApiState:
                 await self._on_event(record, event)
 
         agent = self.agent_factory(workspace, on_event)
+        approval_gate = ApprovalGate()
+        change_store = ChangeStore(workspace)
+        agent.tool_executor.approval_gate = approval_gate
+        agent.tool_executor.change_store = change_store
         record = SessionRecord(
             session_id=agent.session.session_id,
             workspace=workspace,
             agent=agent,
+            approval_gate=approval_gate,
+            change_store=change_store,
         )
         holder["record"] = record
         self.sessions[record.session_id] = record
         return record
 
-    async def start_run(self, session: SessionRecord, task: str) -> RunRecord:
+    async def start_run(
+        self,
+        session: SessionRecord,
+        task: str,
+        auto_approve: bool = False,
+    ) -> RunRecord:
         async with session.lock:
             if session.current_run is not None and not session.current_run.finished:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="session already has a running task",
                 )
+            session.approval_gate.set_auto_approval(auto_approve)
             run = RunRecord(
                 run_id=str(uuid4()),
                 session_id=session.session_id,

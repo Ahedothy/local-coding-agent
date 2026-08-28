@@ -64,6 +64,8 @@ class _UnifiedHunk:
     new_start: int
     new_count: int
     lines: tuple[tuple[str, str], ...]
+    declared_old_count: int | None = None
+    declared_new_count: int | None = None
     old_no_newline: bool = False
     new_no_newline: bool = False
 
@@ -97,6 +99,14 @@ def _parse_hunk_header(line: str) -> tuple[int, int, int, int]:
     return old_start, old_count, new_start, new_count
 
 
+def _starts_file_header(lines: list[str], index: int) -> bool:
+    return (
+        lines[index].startswith("--- ")
+        and index + 1 < len(lines)
+        and lines[index + 1].startswith("+++ ")
+    )
+
+
 def _parse_unified_diff(patch: str) -> list[_UnifiedFilePatch]:
     """Parse standard unified diff text without delegating to a shell tool."""
     lines = patch.splitlines()
@@ -125,15 +135,21 @@ def _parse_unified_diff(patch: str) -> list[_UnifiedFilePatch]:
             if not lines[index].startswith("@@ "):
                 index += 1
                 continue
-            old_start, old_count, new_start, new_count = _parse_hunk_header(lines[index])
+            old_start, declared_old_count, new_start, declared_new_count = (
+                _parse_hunk_header(lines[index])
+            )
             index += 1
             hunk_lines: list[tuple[str, str]] = []
             old_actual = 0
             new_actual = 0
             old_no_newline = False
             new_no_newline = False
-            while index < len(lines) and (old_actual < old_count or new_actual < new_count):
+            while index < len(lines):
                 line = lines[index]
+                if line.startswith("@@ ") or _starts_file_header(lines, index):
+                    break
+                if line.startswith("diff --git ") or line.startswith("index "):
+                    break
                 index += 1
                 if line.startswith("\\ No newline at end of file"):
                     if not hunk_lines:
@@ -151,13 +167,27 @@ def _parse_unified_diff(patch: str) -> list[_UnifiedFilePatch]:
                     old_actual += 1
                 if kind in {" ", "+"}:
                     new_actual += 1
-                if old_actual > old_count or new_actual > new_count:
-                    raise ValueError("unified diff hunk contains too many lines")
                 hunk_lines.append((kind, line[1:]))
-            if old_actual != old_count or new_actual != new_count:
+
+            if not hunk_lines:
+                raise ValueError("unified diff hunk contains no changed or context lines")
+            if old_actual == 0 and new_actual == 0:
+                raise ValueError("unified diff hunk contains no effective lines")
+            if old_actual != declared_old_count or new_actual != declared_new_count:
+                # Header counts are redundant with the body. Normalize this common
+                # model error, then still require exact file context before writing.
+                old_count = old_actual
+                new_count = new_actual
+            else:
+                old_count = declared_old_count
+                new_count = declared_new_count
+            if old_count == 0 and new_count == 0:
                 raise ValueError(
                     "unified diff hunk line count mismatch: "
-                    f"expected {old_count}/{new_count}, found {old_actual}/{new_actual}"
+                    f"expected {declared_old_count}/{declared_new_count}, "
+                    f"found {old_actual}/{new_actual}; "
+                    "old count must equal context plus removed lines and new count "
+                    "must equal context plus added lines"
                 )
             hunks.append(
                 _UnifiedHunk(
@@ -166,12 +196,17 @@ def _parse_unified_diff(patch: str) -> list[_UnifiedFilePatch]:
                     new_start,
                     new_count,
                     tuple(hunk_lines),
+                    declared_old_count,
+                    declared_new_count,
                     old_no_newline,
                     new_no_newline,
                 )
             )
         if not hunks:
-            raise ValueError(f"unified diff contains no hunks for {old_path}")
+            raise ValueError(
+                f"unified diff contains no hunks for {old_path}; include at least one "
+                "@@ hunk with context, removed, or added lines"
+            )
         file_patches.append(_UnifiedFilePatch(old_path, tuple(hunks)))
 
     if not file_patches:
@@ -182,22 +217,68 @@ def _parse_unified_diff(patch: str) -> list[_UnifiedFilePatch]:
     return file_patches
 
 
+def _find_hunk_start(
+    current_lines: list[str],
+    expected: list[str],
+    suggested_start: int,
+    minimum_start: int,
+    old_start: int,
+) -> int:
+    """Locate a hunk by exact context, tolerating only line-number drift."""
+    bounded_suggested = max(minimum_start, suggested_start)
+    if not expected:
+        if bounded_suggested <= len(current_lines):
+            return bounded_suggested
+        raise ValueError(f"patch insertion point is outside the file near old line {old_start}")
+    if (
+        bounded_suggested + len(expected) <= len(current_lines)
+        and current_lines[bounded_suggested : bounded_suggested + len(expected)]
+        == expected
+    ):
+        return bounded_suggested
+
+    candidates = [
+        index
+        for index in range(minimum_start, len(current_lines) - len(expected) + 1)
+        if current_lines[index : index + len(expected)] == expected
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(
+            f"patch context is ambiguous near old line {old_start}; "
+            f"exact hunk context appears {len(candidates)} times"
+        )
+    raise ValueError(f"patch context mismatch near old line {old_start}")
+
+
 def _apply_unified_hunks(content: str, hunks: tuple[_UnifiedHunk, ...]) -> str:
     newline = "\r\n" if "\r\n" in content else "\n"
     had_final_newline = content.endswith(("\n", "\r"))
     updated_final_newline = had_final_newline
     current_lines = content.splitlines()
     offset = 0
+    minimum_start = 0
+    previous_old_start = 0
     for hunk in hunks:
-        start = (0 if hunk.old_start == 0 else hunk.old_start - 1) + offset
         expected = [text for kind, text in hunk.lines if kind in {" ", "-"}]
         replacement = [text for kind, text in hunk.lines if kind in {" ", "+"}]
-        if start < 0 or current_lines[start : start + len(expected)] != expected:
+        if hunk.old_start and hunk.old_start < previous_old_start:
             raise ValueError(
-                f"patch context mismatch near old line {hunk.old_start}"
+                "patch hunks must be ordered by original file line number"
             )
+        suggested_start = (0 if hunk.old_start == 0 else hunk.old_start - 1) + offset
+        start = _find_hunk_start(
+            current_lines,
+            expected,
+            suggested_start,
+            minimum_start,
+            hunk.old_start,
+        )
         current_lines[start : start + len(expected)] = replacement
         offset += hunk.new_count - hunk.old_count
+        minimum_start = start + len(replacement)
+        previous_old_start = hunk.old_start
         if hunk.new_no_newline:
             updated_final_newline = False
         elif hunk.old_no_newline and hunk.new_count > 0:
@@ -245,6 +326,30 @@ def _line_delta(original: str, updated: str) -> tuple[int, int]:
     return added, removed
 
 
+def _newline_variants(value: str) -> tuple[str, ...]:
+    """Return equivalent LF/CRLF forms without changing literal backslash-n text."""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    return tuple(dict.fromkeys((value, normalized, normalized.replace("\n", "\r\n"))))
+
+
+def _replace_text_with_newline_compatibility(
+    content: str,
+    old_text: str,
+    new_text: str,
+    expected_replacements: int,
+) -> tuple[str, int] | None:
+    """Match LF/CRLF equivalents while preserving the matched file style."""
+    for candidate in _newline_variants(old_text):
+        replacement_count = content.count(candidate)
+        if replacement_count != expected_replacements:
+            continue
+        newline = "\r\n" if "\r\n" in candidate else "\n"
+        replacement = new_text.replace("\r\n", "\n").replace("\r", "\n")
+        replacement = replacement.replace("\n", newline)
+        return content.replace(candidate, replacement, expected_replacements), replacement_count
+    return None
+
+
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
     """Replace one file through a same-directory temporary file."""
     temporary_name: str | None = None
@@ -272,7 +377,12 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 class ReplaceInFileTool(Tool):
     name: ClassVar[str] = "replace_in_file"
-    description: ClassVar[str] = "Replace exact text in one UTF-8 file inside the workspace."
+    description: ClassVar[str] = (
+        "Replace one small, contiguous exact text match in one UTF-8 file. "
+        "Use only for a single simple replacement, usually one line or a short "
+        "snippet; use apply_patch for multi-line, multi-location, structural, "
+        "or multi-file edits."
+    )
     parameters_model: ClassVar[type[BaseModel]] = ReplaceInFileArguments
 
     async def execute(
@@ -288,18 +398,19 @@ class ReplaceInFileTool(Tool):
 
         original = path.read_bytes()
         content = original.decode("utf-8")
-        replacement_count = content.count(arguments.old_text)
-        if replacement_count != arguments.expected_replacements:
-            raise ValueError(
-                "replacement count mismatch: "
-                f"expected {arguments.expected_replacements}, found {replacement_count}"
-            )
-
-        updated = content.replace(
+        replacement = _replace_text_with_newline_compatibility(
+            content,
             arguments.old_text,
             arguments.new_text,
             arguments.expected_replacements,
         )
+        if replacement is None:
+            replacement_count = content.count(arguments.old_text)
+            raise ValueError(
+                "replacement count mismatch: "
+                f"expected {arguments.expected_replacements}, found {replacement_count}"
+            )
+        updated, replacement_count = replacement
         updated_bytes = updated.encode("utf-8")
         _atomic_write_bytes(path, updated_bytes)
         lines_added, lines_removed = _line_delta(content, updated)
@@ -333,9 +444,16 @@ class ReplaceInFileTool(Tool):
 class ApplyPatchTool(Tool):
     name: ClassVar[str] = "apply_patch"
     description: ClassVar[str] = (
-        "Apply a standard multi-file unified diff to existing UTF-8 files "
-        "inside the workspace. Validate all hunks before writing and roll back "
-        "if any file write fails. Use replace_in_file for one simple replacement."
+        "Preferred editing tool for multi-line, multi-location, structural, or "
+        "multi-file changes. Apply a standard unified diff to existing UTF-8 "
+        "files inside the workspace. Every changed region must be represented "
+        "by a complete @@ hunk with matching context. Hunks should be ordered "
+        "top to bottom using original file line numbers; the executor can recover "
+        "a unique exact context when a line number drifts, but it never ignores "
+        "or fuzzes source text. Redundant hunk line counts are normalized from "
+        "the body before context validation. "
+        "Validate all hunks before writing and roll back if any file write "
+        "fails. Use replace_in_file only for one small simple exact replacement."
     )
     parameters_model: ClassVar[type[BaseModel]] = ApplyPatchArguments
 
@@ -351,6 +469,7 @@ class ApplyPatchTool(Tool):
 
         plans: list[_PatchPlan] = []
         applied_hunks: list[dict[str, object]] = []
+        normalized_hunks: list[dict[str, object]] = []
         rejected_hunks: list[dict[str, object]] = []
 
         for file_patch in file_patches:
@@ -389,6 +508,19 @@ class ApplyPatchTool(Tool):
             applied_hunks.extend(
                 {"path": relative_path, "hunk": index}
                 for index, _ in enumerate(file_patch.hunks, start=1)
+            )
+            normalized_hunks.extend(
+                {
+                    "path": relative_path,
+                    "hunk": index,
+                    "declared_old_count": hunk.declared_old_count,
+                    "declared_new_count": hunk.declared_new_count,
+                    "old_count": hunk.old_count,
+                    "new_count": hunk.new_count,
+                }
+                for index, hunk in enumerate(file_patch.hunks, start=1)
+                if hunk.declared_old_count != hunk.old_count
+                or hunk.declared_new_count != hunk.new_count
             )
             plans.append(
                 _PatchPlan(
@@ -447,6 +579,7 @@ class ApplyPatchTool(Tool):
                 output={
                     "touched_files": [],
                     "applied_hunks": [],
+                    "normalized_hunks": normalized_hunks,
                     "rejected_hunks": rejected_hunks,
                     "diff_summary": diff_summary,
                     "diff": unified_diff,
@@ -461,6 +594,7 @@ class ApplyPatchTool(Tool):
             output={
                 "touched_files": touched_files,
                 "applied_hunks": applied_hunks,
+                "normalized_hunks": normalized_hunks,
                 "rejected_hunks": rejected_hunks,
                 "diff_summary": diff_summary,
                 "diff": unified_diff,
@@ -481,6 +615,7 @@ class ApplyPatchTool(Tool):
             output={
                 "touched_files": [],
                 "applied_hunks": [],
+                "normalized_hunks": [],
                 "rejected_hunks": rejected_hunks,
                 "diff_summary": {
                     "files": 0,
@@ -496,4 +631,4 @@ class ApplyPatchTool(Tool):
         )
 
 
-EDIT_TOOLS: tuple[Tool, ...] = (ReplaceInFileTool(), ApplyPatchTool())
+EDIT_TOOLS: tuple[Tool, ...] = (ApplyPatchTool(), ReplaceInFileTool())

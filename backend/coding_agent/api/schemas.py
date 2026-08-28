@@ -45,6 +45,7 @@ class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task: str = Field(min_length=1)
+    auto_approve: bool = False
 
 
 class RunResponse(BaseModel):
@@ -60,3 +61,25 @@ class CancelResponse(BaseModel):
 
     run_id: str
     status: str
+
+
+class ApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool
+    approve_current_turn: bool = False
+
+
+class ApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str
+    status: str
+
+
+class RevertChangeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    change_id: str
+    status: str
+    diff: str

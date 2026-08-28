@@ -72,9 +72,11 @@ class Agent:
         self._tool_calls = 0
         self._plan_emitted = False
         self._turn_started_at: float | None = None
+        self._turn_diffs: dict[str, str] = {}
 
         if self.tool_executor.event_handler is None and event_handler is not None:
             self.tool_executor.event_handler = event_handler
+        self.tool_context.cancellation_token = self._cancel_event
 
     def cancel(self) -> None:
         """Request cooperative cancellation at the next safe loop boundary."""
@@ -100,8 +102,10 @@ class Agent:
         self._iterations = 0
         self._tool_calls = 0
         self._plan_emitted = False
+        self._turn_diffs = {}
         self._turn_started_at = time.monotonic()
         self._turn_index += 1
+        self.tool_context.turn_id = f"turn-{self._turn_index}"
         self.session.task = user_message
         self.session.status = SessionStatus.RUNNING
         self.session.updated_at = datetime.now(timezone.utc)
@@ -170,6 +174,7 @@ class Agent:
             return await self._finalize(result)
         finally:
             # Cancellation belongs to the active turn and must not poison the next one.
+            self.tool_executor.finish_turn(self.tool_context.turn_id)
             self._cancel_event.clear()
 
     async def _run_loop(self) -> AgentRunResult:
@@ -241,14 +246,23 @@ class Agent:
                 response.content,
                 tool_calls=response.tool_calls,
             )
+            final_content = response.content
+            if not response.tool_calls and response.content and self._turn_diffs:
+                combined_diff = "\n".join(diff.rstrip("\n") for diff in self._turn_diffs.values())
+                final_content = (
+                    f"{response.content.rstrip()}\n\n"
+                    "## Changes\n\n"
+                    f"```diff\n{combined_diff}\n```"
+                )
             await self._emit(
                 AgentEvent(
                     type=AgentEventType.ASSISTANT_MESSAGE,
                     session_id=self.session.session_id,
                     iteration=iteration,
                     payload={
-                        "content": response.content,
+                        "content": final_content,
                         "tool_call_count": len(response.tool_calls),
+                        "has_changes": bool(self._turn_diffs),
                     },
                 )
             )
@@ -277,7 +291,7 @@ class Agent:
                 if response.content and response.content.strip():
                     return AgentRunResult(
                         status=SessionStatus.COMPLETED,
-                        final_answer=response.content,
+                        final_answer=final_content,
                         iterations=self._iterations,
                         tool_calls=self._tool_calls,
                     )
@@ -297,6 +311,18 @@ class Agent:
                 self._tool_calls += 1
                 result = await self.tool_executor.execute(tool_call, self.tool_context)
                 await self._append_tool_result(result, iteration)
+                if result.success and isinstance(result.output, dict):
+                    diff = result.output.get("diff")
+                    if isinstance(diff, str) and diff.strip():
+                        change_id = result.metadata.get("change_id")
+                        key = change_id if isinstance(change_id, str) else f"diff-{len(self._turn_diffs)}"
+                        self._turn_diffs[key] = diff
+
+                if (
+                    not result.success
+                    and result.metadata.get("decision") == "rejected"
+                ):
+                    return self._failed("operation rejected by user; Agent stopped without retrying it")
 
                 signature = tool_call_signature(tool_call)
                 same_call_counts[signature] += 1

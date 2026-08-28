@@ -169,9 +169,21 @@ Successful results include touched files, hunk counts, line and byte deltas,
 a concise diff summary, and the generated standard unified diff. The same diff
 is included in the tool-finished event so it is visible in CLI and Web UI
 output. Failed results include rejected hunk diagnostics and rollback status.
-The system prompt tells the model to use
-`replace_in_file` for one simple replacement and `apply_patch` for related
-multi-line or multi-file edits.
+To improve first-attempt success with LLM-generated patches, the parser
+normalizes redundant `@@` old/new line counts from each hunk body before
+context validation. The hunk applier also tolerates a unique exact context
+match when a model's line number has drifted, while rejecting ambiguous, stale,
+or overlapping context. This only repairs location/count bookkeeping mistakes;
+it never uses whitespace fuzzing or writes without an exact source match.
+The system prompt and tool descriptions use an explicit editing decision rule:
+`replace_in_file` is reserved for one small contiguous exact replacement,
+while `apply_patch` is preferred for edits affecting two or more lines,
+multiple locations, code structure, or multiple files. Both tools remain
+locally implemented and approval-gated.
+The Web UI provides both one-turn auto-approval from an approval card and a
+session-level auto-approval switch beside the composer. The session switch is
+sent with each new run, while the runtime still records approval events for
+automatically approved operations and resets one-turn approval after completion.
 
 Focused coverage verifies multiple files, ordered hunks, stale context,
 workspace escapes, binary rejection, and write-failure rollback.

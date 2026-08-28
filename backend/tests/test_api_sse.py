@@ -10,8 +10,9 @@ import httpx
 from coding_agent.agent import Agent, Session
 from coding_agent.api import create_app
 from coding_agent.context import ContextManager
-from coding_agent.models import ModelResponse, MockModelProvider
+from coding_agent.models import ModelResponse, MockModelProvider, ToolCall
 from coding_agent.tools import ToolExecutor, ToolRegistry
+from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
 from coding_agent.workspace import Workspace
 
 
@@ -178,3 +179,84 @@ def test_api_file_preview_distinguishes_text_and_binary_files(tmp_path: Path) ->
     assert text_response.json()["content"] == "hello\nworld\n"
     assert binary_response.status_code == 415
     assert "supported" in binary_response.json()["detail"]
+
+
+def test_api_approval_endpoint_releases_a_local_edit(tmp_path: Path) -> None:
+    def factory(workspace: Workspace, event_handler) -> Agent:
+        session = Session(workspace_root=workspace.root)
+        return Agent(
+            MockModelProvider(
+                [
+                    ModelResponse(
+                        tool_calls=[
+                            ToolCall(
+                                id="write-1",
+                                name="write_file",
+                                arguments={"path": "hello.txt", "content": "hello\n"},
+                            )
+                        ]
+                    ),
+                    ModelResponse(content="Created hello.txt."),
+                ]
+            ),
+            ToolExecutor(ToolRegistry(FILESYSTEM_TOOLS), event_handler=event_handler),
+            ContextManager("You are a test agent."),
+            session,
+            event_handler=event_handler,
+        )
+
+    app = create_app(factory)
+
+    async def scenario() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (
+                await client.post("/sessions", json={"workspace_root": str(tmp_path)})
+            ).json()["session_id"]
+            run_id = (
+                await client.post(
+                    f"/sessions/{session_id}/runs",
+                    json={"task": "create hello.txt"},
+                )
+            ).json()["run_id"]
+            state = app.state.agent_state
+            approval_id = None
+            for _ in range(100):
+                pending = state.sessions[session_id].approval_gate._pending
+                if pending:
+                    approval_id = next(iter(pending))
+                    break
+                await asyncio.sleep(0.01)
+            assert approval_id is not None
+            decision = await client.post(
+                f"/sessions/{session_id}/approvals/{approval_id}",
+                json={"approved": True, "approve_current_turn": True},
+            )
+            events = await client.get(f"/runs/{run_id}/events")
+            event_payloads = [
+                json.loads(line.removeprefix("data: "))
+                for line in events.text.splitlines()
+                if line.startswith("data: ")
+            ]
+            finished_tool = next(
+                payload
+                for payload in event_payloads
+                if payload["type"] == "tool_finished"
+            )
+            change_id = finished_tool["payload"]["metadata"]["change_id"]
+            revert = await client.post(
+                f"/sessions/{session_id}/changes/{change_id}/revert"
+            )
+            return decision, events, revert
+
+    decision, events, revert = asyncio.run(scenario())
+
+    assert decision.status_code == 200
+    assert decision.json()["status"] == "approved"
+    assert events.status_code == 200
+    assert "event: approval_requested" in events.text
+    assert "event: approval_resolved" in events.text
+    assert "event: agent_finished" in events.text
+    assert revert.status_code == 200
+    assert revert.json()["status"] == "reverted"
+    assert not (tmp_path / "hello.txt").exists()

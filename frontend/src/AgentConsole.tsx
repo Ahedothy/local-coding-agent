@@ -19,6 +19,8 @@ import {
   ListChecks,
   RotateCcw,
   Send,
+  ShieldCheck,
+  ShieldX,
   Terminal,
   UserRound,
   Wrench,
@@ -59,6 +61,8 @@ const eventLabels: Record<string, string> = {
   tool_started: "Tool started",
   tool_finished: "Tool finished",
   tool_failed: "Tool failed",
+  approval_requested: "Approval needed",
+  approval_resolved: "Approval resolved",
   assistant_message: "Assistant message",
   plan: "Plan",
   reflection: "Reflection",
@@ -70,8 +74,9 @@ const eventLabels: Record<string, string> = {
 const eventTypes = Object.keys(eventLabels);
 function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
+  if (type === "approval_requested") return "working";
   if (type === "plan") return "working";
-  if (["tool_finished", "agent_finished", "context_compacted"].includes(type)) return "success";
+  if (["tool_finished", "agent_finished", "context_compacted", "approval_resolved"].includes(type)) return "success";
   if (["tool_failed", "agent_error"].includes(type)) return "danger";
   return "neutral";
 }
@@ -81,6 +86,7 @@ function iconForEvent(type: string) {
   if (type === "plan") return <ListChecks size={15} />;
   if (type === "reflection") return <RotateCcw size={15} />;
   if (type === "tool_failed" || type === "agent_error") return <XCircle size={15} />;
+  if (type === "approval_requested") return <ShieldCheck size={15} />;
   if (type === "agent_finished" || type === "tool_finished") return <CheckCircle2 size={15} />;
   if (type.startsWith("model") || type === "assistant_message") return <Bot size={15} />;
   if (type.startsWith("context")) return <Code2 size={15} />;
@@ -150,7 +156,40 @@ function activityPresentation(step: ActivityStep) {
     if (Array.isArray(output?.touched_files)) return { title: toolName, description: `${output.touched_files.length} file${output.touched_files.length === 1 ? "" : "s"} updated locally.` };
     return { title: event.type === "tool_started" ? toolName : `${toolName} complete`, description: event.type === "tool_started" ? "Working in your local workspace." : "Local operation completed successfully." };
   }
-  if (event.type === "tool_failed") return { title: `${toolName} needs attention`, description: readPayloadString(event, "error") ?? "The local operation could not be completed." };
+  if (event.type === "tool_failed") {
+    const error = readPayloadString(event, "error") ?? "The local operation could not be completed.";
+    return error.includes("replacement count mismatch")
+      ? { title: "Update needs a fresh match", description: "The target text was not found exactly. The Agent should reread the file before trying again." }
+      : error.includes("unified diff contains no hunks")
+        ? { title: "Patch has no changes", description: "The Agent provided file headers without an actual @@ change block. It should reread the file and use replace_in_file for a simple edit or regenerate a complete patch." }
+      : error.includes("hunk line count mismatch")
+        ? { title: "Patch line counts need fixing", description: "The @@ header counts do not match the hunk lines. Old count = context + removed lines; new count = context + added lines. The Agent should regenerate the hunk instead of resending it." }
+      : error.includes("invalid unified diff")
+        ? { title: "Patch needs regeneration", description: "The patch format was invalid. The Agent should reread the file and create a fresh patch." }
+        : { title: `${toolName} needs attention`, description: error };
+  }
+  if (event.type === "approval_requested") {
+    if (event.payload.automatic === true && event.payload.approval_scope === "session") {
+      return { title: "Auto-approved", description: "Session auto-approval is enabled for this operation." };
+    }
+    return event.payload.automatic === true
+      ? { title: "Auto-approved", description: "This operation is covered by approval for the current message." }
+      : { title: "Approval needed", description: "Waiting for your approval before a local change or command." };
+  }
+  if (event.type === "approval_resolved") {
+    const decision = readPayloadString(event, "decision");
+    if (decision === "approved" && event.payload.automatic === true) {
+      return event.payload.approval_scope === "session"
+        ? { title: "Auto-approved", description: "Approved automatically while session auto-approval is enabled." }
+        : { title: "Auto-approved", description: "Approved automatically for this message." };
+    }
+    if (decision === "approved" && event.payload.approval_scope === "current_turn") {
+      return { title: "Approved for this message", description: "This approval covers the remaining local operations in the current message." };
+    }
+    return decision === "approved"
+      ? { title: "Approval granted", description: "The local operation is allowed to continue." }
+      : { title: "Approval declined", description: "The local operation was blocked by your decision." };
+  }
   if (event.type === "context_truncated") return { title: "Context trimmed", description: "Keeping the most relevant conversation details." };
   if (event.type === "context_compacted") return { title: "Memory compressed", description: "Conversation context was condensed to stay within the model budget." };
   if (event.type === "agent_error") return { title: "Run stopped", description: readPayloadString(event, "error") ?? "The Agent could not finish this task." };
@@ -160,6 +199,7 @@ function activityPresentation(step: ActivityStep) {
 function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
   const steps: ActivityStep[] = [];
   const toolSteps = new Map<string, ActivityStep>();
+  const approvalSteps = new Map<string, ActivityStep>();
   let modelStep: ActivityStep | undefined;
 
   for (const event of events) {
@@ -192,6 +232,25 @@ function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
       modelStep = undefined;
       continue;
     }
+    if (event.type === "approval_requested") {
+      const step = { event, events: [event] };
+      steps.push(step);
+      const approvalId = event.payload.approval_id;
+      if (typeof approvalId === "string") approvalSteps.set(approvalId, step);
+      modelStep = undefined;
+      continue;
+    }
+    if (event.type === "approval_resolved") {
+      const approvalId = event.payload.approval_id;
+      const step = typeof approvalId === "string" ? approvalSteps.get(approvalId) : undefined;
+      if (step) {
+        step.events.push(event);
+        step.event = event;
+      } else {
+        steps.push({ event, events: [event] });
+      }
+      continue;
+    }
     if (event.type === "tool_finished" || event.type === "tool_failed") {
       const toolCallId = event.payload.tool_call_id;
       const step = typeof toolCallId === "string" ? toolSteps.get(toolCallId) : undefined;
@@ -214,7 +273,7 @@ function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
 function activityDetails(step: ActivityStep) {
   const event = step.event;
   const output = activityOutput(step);
-  const details: Array<[string, string]> = [["Status", event.type === "tool_failed" || event.type === "agent_error" ? "Needs attention" : ["tool_finished", "agent_finished"].includes(event.type) ? "Completed" : "In progress"]];
+  const details: Array<[string, string]> = [["Status", event.type === "tool_failed" || event.type === "agent_error" ? "Needs attention" : event.type === "approval_resolved" ? (readPayloadString(event, "decision") === "approved" ? "Approved" : "Declined") : ["tool_finished", "agent_finished"].includes(event.type) ? "Completed" : "In progress"]];
   if (typeof event.payload.tool_name === "string") details.push(["Tool", event.payload.tool_name]);
   if (event.iteration !== null) details.push(["Iteration", String(event.iteration)]);
   if (typeof output?.path === "string") details.push(["Path", output.path]);
@@ -223,6 +282,12 @@ function activityDetails(step: ActivityStep) {
   if (typeof output?.duration_seconds === "number") details.push(["Duration", `${output.duration_seconds.toFixed(2)}s`]);
   if (typeof event.payload.tool_call_count === "number") details.push(["Tool calls", String(event.payload.tool_call_count)]);
   if (typeof event.payload.message_count === "number") details.push(["Messages", String(event.payload.message_count)]);
+  const approvalDetailsValue = objectValue(event.payload.details);
+  if (event.type === "approval_requested" && approvalDetailsValue) {
+    if (typeof approvalDetailsValue.command === "string") details.push(["Command", approvalDetailsValue.command]);
+    if (Array.isArray(approvalDetailsValue.command)) details.push(["Command", approvalDetailsValue.command.join(" ")]);
+    if (typeof approvalDetailsValue.path === "string") details.push(["Path", approvalDetailsValue.path]);
+  }
   const error = readPayloadString(event, "error");
   if (error) details.push(["Error", error]);
   return details;
@@ -237,6 +302,8 @@ const thinkingEventTypes = [
   "tool_started",
   "tool_finished",
   "tool_failed",
+  "approval_requested",
+  "approval_resolved",
   "context_truncated",
   "context_compacted",
   "agent_error",
@@ -276,7 +343,21 @@ function conversationStats(events: AgentEvent[]) {
 }
 
 function activeToolForEvents(events: AgentEvent[]) {
-  return [...events].reverse().find((event) => event.type === "tool_started" && !events.some((candidate) => ["tool_finished", "tool_failed"].includes(candidate.type) && candidate.payload.tool_call_id === event.payload.tool_call_id))?.payload.tool_name;
+  return [...events].reverse().find((event) => {
+    if (event.type === "approval_requested") return true;
+    return event.type === "tool_started" && !events.some((candidate) => ["tool_finished", "tool_failed"].includes(candidate.type) && candidate.payload.tool_call_id === event.payload.tool_call_id);
+  })?.payload.tool_name;
+}
+
+function changeIdsForEvents(events: AgentEvent[]) {
+  return events
+    .filter((event) => event.type === "tool_finished")
+    .map((event) => {
+      const metadata = objectValue(event.payload.metadata);
+      const changeId = metadata?.change_id;
+      return typeof changeId === "string" ? changeId : null;
+    })
+    .filter((value): value is string => value !== null);
 }
 
 const languageByExtension: Record<string, string> = {
@@ -384,6 +465,50 @@ function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
   return nodes;
 }
 
+type DiffFile = { path: string; lines: string[]; added: number; removed: number };
+
+function diffFilePath(header: string) {
+  const value = header.replace(/^\+\+\+\s+/, "").split("\t", 1)[0].trim();
+  return value.startsWith("b/") ? value.slice(2) : value;
+}
+
+function parseDiffFiles(diff: string): DiffFile[] {
+  const files: DiffFile[] = [];
+  let current: DiffFile | null = null;
+  for (const line of diff.replace(/\r\n/g, "\n").split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      if (current) files.push(current);
+      current = { path: "", lines: [line], added: 0, removed: 0 };
+      continue;
+    }
+    if (line.startsWith("--- ") && !current) {
+      current = { path: "", lines: [], added: 0, removed: 0 };
+    }
+    if (!current) continue;
+    current.lines.push(line);
+    if (line.startsWith("+++ ")) {
+      current.path = diffFilePath(line);
+    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+      current.added += 1;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      current.removed += 1;
+    }
+  }
+  if (current) files.push(current);
+  return files.filter((file) => file.path && file.lines.some((line) => line.startsWith("@@ ")));
+}
+
+function UnifiedDiff({ diff }: { diff: string }): ReactElement {
+  const files = parseDiffFiles(diff);
+  if (!files.length) {
+    return <pre className="markdown-code-block"><code>{diff}</code></pre>;
+  }
+  return <div className="diff-files">{files.map((file) => <details className="diff-file" key={file.path}>
+    <summary><span className="diff-file-summary-main"><ChevronDown className="diff-file-chevron" size={14} /><code>{file.path}</code></span><span className="diff-file-stats"><span className="diff-added">+{file.added}</span><span className="diff-removed">-{file.removed}</span></span></summary>
+    <pre className="diff-file-body"><code>{file.lines.map((line, lineIndex) => <span className={"diff-line " + (line.startsWith("@@ ") ? "diff-hunk" : line.startsWith("+") && !line.startsWith("+++") ? "diff-added-line" : line.startsWith("-") && !line.startsWith("---") ? "diff-removed-line" : "")} key={file.path + "-" + lineIndex}>{line}{lineIndex < file.lines.length - 1 ? "\n" : ""}</span>)}</code></pre>
+  </details>)}</div>;
+}
+
 function MarkdownAnswer({ content }: { content: string }): ReactElement {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
@@ -406,7 +531,9 @@ function MarkdownAnswer({ content }: { content: string }): ReactElement {
         index += 1;
       }
       if (index < lines.length) index += 1;
-      blocks.push(<pre className="markdown-code-block" key={`code-${blockIndex++}`}><code className={language ? `language-${language}` : undefined}>{codeLines.join("\n")}</code></pre>);
+      blocks.push(language.toLowerCase() === "diff" || language.toLowerCase() === "patch"
+        ? <UnifiedDiff diff={codeLines.join("\n")} key={"diff-" + blockIndex++} />
+        : <pre className="markdown-code-block" key={"code-" + blockIndex++}><code className={language ? "language-" + language : undefined}>{codeLines.join("\n")}</code></pre>);
       continue;
     }
 
@@ -462,6 +589,34 @@ function MarkdownAnswer({ content }: { content: string }): ReactElement {
   return <div className="markdown-answer">{blocks}</div>;
 }
 
+function ApprovalCard({
+  approval,
+  busy,
+  onDecide,
+}: {
+  approval: AgentEvent;
+  busy: boolean;
+  onDecide: (approved: boolean, approveCurrentTurn?: boolean) => void;
+}): ReactElement {
+  const details = objectValue(approval.payload.details);
+  const command = Array.isArray(details?.command) ? details.command.join(" ") : undefined;
+  const patch = typeof details?.patch === "string" ? details.patch : undefined;
+  const contentPreview = typeof details?.content_preview === "string" ? details.content_preview : undefined;
+  const oldText = typeof details?.old_text === "string" ? details.old_text : undefined;
+  const newText = typeof details?.new_text === "string" ? details.new_text : undefined;
+  const preview = patch ?? contentPreview ?? (oldText !== undefined || newText !== undefined
+    ? `- ${oldText ?? ""}\n+ ${newText ?? ""}`
+    : undefined);
+  return <section className="approval-card" aria-label="Approval required">
+    <div className="approval-card-heading"><span className="approval-card-icon"><ShieldCheck size={17} /></span><div><strong>Approval required</strong><p>{readPayloadString(approval, "summary") ?? "The Agent wants to perform a local operation."}</p></div></div>
+    {command && <div className="approval-field"><span>Command</span><code>{command}</code></div>}
+    {typeof details?.cwd === "string" && <div className="approval-field"><span>Working folder</span><code>{details.cwd}</code></div>}
+    {typeof details?.path === "string" && <div className="approval-field"><span>File</span><code>{details.path}</code></div>}
+    {preview && <pre className="approval-preview">{preview}</pre>}
+    <div className="approval-actions"><button className="approval-button approval-button-reject" onClick={() => onDecide(false)} disabled={busy}><ShieldX size={15} />Reject</button><button className="approval-button approval-button-approve-once" onClick={() => onDecide(true)} disabled={busy}><ShieldCheck size={15} />Approve once</button><button className="approval-button approval-button-approve-turn" onClick={() => onDecide(true, true)} disabled={busy} title="Approve this operation and automatically approve later local operations from the current message"><ListChecks size={15} />Auto-approve this message</button></div>
+  </section>;
+}
+
 export default function AgentConsole() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceEntry[]>([]);
@@ -471,6 +626,7 @@ export default function AgentConsole() {
   const [previewMessage, setPreviewMessage] = useState("");
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [task, setTask] = useState("");
+  const [autoApprovalEnabled, setAutoApprovalEnabled] = useState(false);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [run, setRun] = useState<RunResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -483,6 +639,9 @@ export default function AgentConsole() {
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("idle");
   const [displayedAnswer, setDisplayedAnswer] = useState("");
   const [answerStreaming, setAnswerStreaming] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<AgentEvent | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [revertedChanges, setRevertedChanges] = useState<Set<string>>(new Set());
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(270);
@@ -561,7 +720,11 @@ export default function AgentConsole() {
     setError(null);
     setEvents([]);
     setRun(null);
+    setAutoApprovalEnabled(false);
     setExpandedActivityTurns(new Set());
+    setPendingApproval(null);
+    setApprovalBusy(false);
+    setRevertedChanges(new Set());
     try {
       const response = await fetch(`${API_BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace_root: root }) });
       if (!response.ok) throw new Error(await responseError(response, "Could not create session"));
@@ -587,7 +750,7 @@ export default function AgentConsole() {
     setBusy(true);
     eventSource.current?.close();
     try {
-      const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask }) });
+      const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask, auto_approve: autoApprovalEnabled }) });
       if (!response.ok) throw new Error(await responseError(response, "Could not start run"));
       const started = (await response.json()) as RunResponse;
       const nextHistory = [{ task: submittedTask, timestamp: new Date().toISOString() }, ...history.filter((item) => item.task !== submittedTask)].slice(0, 8);
@@ -599,6 +762,15 @@ export default function AgentConsole() {
       const handleEvent = (message: Event) => {
         const event = JSON.parse((message as MessageEvent<string>).data) as AgentEvent;
         setEvents((current) => [...current, event]);
+        if (event.type === "approval_requested") {
+          setPendingApproval(event);
+          setApprovalBusy(false);
+          setThinkingExpanded(true);
+        }
+        if (event.type === "approval_resolved") {
+          setPendingApproval(null);
+          setApprovalBusy(false);
+        }
         if (["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
           void loadWorkspaceFiles(started.session_id).catch((reason) => {
             setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
@@ -611,6 +783,8 @@ export default function AgentConsole() {
         }
         if (event.type === "agent_finished" || event.type === "agent_error") {
           setBusy(false);
+          setPendingApproval(null);
+          setApprovalBusy(false);
           setThinkingExpanded(false);
           source.close();
         }
@@ -618,6 +792,8 @@ export default function AgentConsole() {
       eventTypes.forEach((eventType) => source.addEventListener(eventType, handleEvent));
       source.onerror = () => {
         setBusy(false);
+        setPendingApproval(null);
+        setApprovalBusy(false);
         source.close();
         setError("The event stream closed unexpectedly.");
       };
@@ -636,6 +812,45 @@ export default function AgentConsole() {
     }
   }
 
+  async function decideApproval(approved: boolean, approveCurrentTurn = false) {
+    if (!session || !pendingApproval) return;
+    const approvalId = pendingApproval.payload.approval_id;
+    if (typeof approvalId !== "string") return;
+    setApprovalBusy(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/sessions/${session.session_id}/approvals/${approvalId}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approved, approve_current_turn: approveCurrentTurn }),
+        },
+      );
+      if (!response.ok) throw new Error(await responseError(response, "Could not resolve approval"));
+    } catch (reason) {
+      setApprovalBusy(false);
+      setError(reason instanceof Error ? reason.message : "Could not resolve approval");
+    }
+  }
+
+  async function revertChange(changeId: string) {
+    if (!session) return;
+    try {
+      const response = await fetch(
+        `${API_BASE}/sessions/${session.session_id}/changes/${changeId}/revert`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await responseError(response, "Could not undo changes"));
+      setRevertedChanges((current) => new Set(current).add(changeId));
+      await loadWorkspaceFiles(session.session_id);
+      if (selectedFilePathRef.current) {
+        await selectFile(selectedFilePathRef.current, session.session_id);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not undo changes");
+    }
+  }
+
   function resetSession() {
     eventSource.current?.close();
     if (answerTimer.current !== null) {
@@ -651,6 +866,9 @@ export default function AgentConsole() {
     setBusy(false);
     setDisplayedAnswer("");
     setAnswerStreaming(false);
+    setPendingApproval(null);
+    setApprovalBusy(false);
+    setRevertedChanges(new Set());
     setWorkspaceFiles([]);
     setExpandedFolders(new Set());
     setSelectedFilePath(null);
@@ -795,7 +1013,7 @@ export default function AgentConsole() {
 
     <main className="console-layout" style={layoutStyle}>
       {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Workspace panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show workspace" aria-label="Show workspace"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Workspace and run controls">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Workspace</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={resetSession} title="Switch workspace" aria-label="Switch workspace" disabled={!session}><ArrowLeftRight size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Workspace</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={resetSession} title="Change workspace" aria-label="Change workspace" disabled={!session}><ArrowLeftRight size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
         {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><LoaderCircle className="spin" size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading workspace...</> : <><FolderOpen size={16} />Choose folder</>}</button> : <div className="session-bar"><span title={session.workspace_root}>{workspaceRoot || session.workspace_root}</span></div>}
         {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>No folder selected</strong><small>Choose a local folder to get started.</small></span></div>}
         {workspacePhase !== "idle" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{workspacePhase === "selecting" ? "Selecting a local folder..." : "Scanning local workspace..."}</span></div>}
@@ -820,17 +1038,23 @@ export default function AgentConsole() {
             const hasAgentError = turnThinkingEvents.some((event) => event.type === "agent_error");
             const stats = conversationStats(turn.events);
             const turnActiveTool = isLatestTurn ? activeToolForEvents(turn.events) : undefined;
+            const turnApproval = isLatestTurn ? [...turn.events].reverse().find((event) => event.type === "approval_requested") : undefined;
+            const approvalId = turnApproval?.payload.approval_id;
+            const approvalIsPending = Boolean(turnApproval && pendingApproval && approvalId === pendingApproval.payload.approval_id);
+            const changeIds = [...new Set(changeIdsForEvents(turn.events))];
             return <div className="conversation-turn" key={turn.key}>
               <article className="chat-message user-message"><div className="message-avatar user-avatar"><UserRound size={16} /></div><div className="message-body"><div className="message-meta"><strong>You</strong><time>{formatTime(turn.userEvent.timestamp)}</time></div><p>{readPayloadString(turn.userEvent, "content")}</p></div></article>
               {(turnActivitySteps.length > 0 || turnAnswer) && <article className="chat-message agent-message">
                 <div className="message-avatar agent-avatar"><Bot size={16} /></div>
                 <div className="message-body">
                   <div className="message-meta"><strong>Agent</strong><time>{turnBusy ? "working" : turnFinalAnswer ? "final answer" : "activity"}</time><span className="message-stats"><span><Clock3 size={11} />{stats.duration}</span><span>{stats.iterations || 0} {stats.iterations === 1 ? "step" : "steps"}</span><span>{stats.tools || 0} {stats.tools === 1 ? "tool" : "tools"}</span>{stats.failures > 0 && <span className="message-stats-danger">{stats.failures} failed</span>}</span></div>
+                  {approvalIsPending && pendingApproval && <ApprovalCard approval={pendingApproval} busy={approvalBusy} onDecide={(approved, approveCurrentTurn) => void decideApproval(approved, approveCurrentTurn)} />}
                   {turnActivitySteps.length > 0 && <details className="thinking-inline" open={isLatestTurn ? thinkingExpanded : expandedActivityTurns.has(turn.key)} onToggle={(event) => { const open = event.currentTarget.open; if (isLatestTurn) setThinkingExpanded(open); else setExpandedActivityTurns((current) => { const next = new Set(current); if (open) next.add(turn.key); else next.delete(turn.key); return next; }); }}>
                     <summary><span className="thinking-summary-main"><span className="thinking-avatar"><BrainCircuit size={16} /></span><span><strong>{turnBusy ? "Agent activity" : "Agent activity complete"}</strong><small>{turnBusy ? (turnActiveTool ? `Using ${toolDisplayName(turnActiveTool)}` : "Following the task") : `${turnActivitySteps.length} activity ${turnActivitySteps.length === 1 ? "step" : "steps"}`}</small></span></span><span className="thinking-summary-state">{turnBusy ? <LoaderCircle className="spin" size={15} /> : hasAgentError ? <XCircle size={15} /> : <CheckCircle2 size={15} />}</span></summary>
                     <div className="thinking-steps">{turnActivitySteps.map((step) => { const presentation = activityPresentation(step); return <div className={`thinking-step tone-${eventTone(step.event.type)}`} key={step.events[0].event_id}><span className="thinking-step-icon">{step.event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(step.event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{presentation.title}</strong><time>{formatTime(step.event.timestamp)}</time></div><p>{presentation.description}</p><details className="thinking-payload"><summary>Execution details</summary><dl className="execution-details">{activityDetails(step).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details></div></div>; })}</div>
                   </details>}
                   {turnAnswer && <div className="answer-copy"><MarkdownAnswer content={turnAnswer} /><span className={`answer-cursor ${isLatestTurn && answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div>}
+                  {changeIds.length > 0 && <div className="changes-actions"><span><strong>Local changes</strong><small>Unified diff included above.</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />Changes reverted</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />Undo changes</button>)}</div>}
                 </div>
               </article>}
             </div>;
@@ -841,7 +1065,7 @@ export default function AgentConsole() {
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
 
-        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><label className="visually-hidden" htmlFor="task-upgraded">Message the agent</label><div className="composer-input-shell"><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="Message the agent. Press Enter to send and Ctrl+Enter for a new line." placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "Cancel agent run" : "Send message"} title={busy ? "Cancel agent run" : "Send message"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "Cancel" : "Send"}</button></div></div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy} /><ShieldCheck size={14} /><span>Auto-approve local actions</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "Enabled for sent messages" : "Manual approval"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">Message the agent</label><div className="composer-input-shell"><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="Message the agent. Press Enter to send and Ctrl+Enter for a new line." placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "Cancel agent run" : "Send message"} title={busy ? "Cancel agent run" : "Send message"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "Cancel" : "Send"}</button></div></div>
       </section>
 
       <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="Resize preview panel"><span className="resizer-handle" /></div>

@@ -13,10 +13,13 @@ from coding_agent.events import AgentEvent
 from .app import ApiState, RunRecord
 from .schemas import (
     CancelResponse,
+    ApprovalDecisionRequest,
+    ApprovalResponse,
     CreateSessionRequest,
     DirectorySelectionResponse,
     RunRequest,
     RunResponse,
+    RevertChangeResponse,
     SessionResponse,
     WorkspaceEntryResponse,
     WorkspaceFileResponse,
@@ -144,7 +147,7 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
         session = state.sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
-        run = await state.start_run(session, request.task)
+        run = await state.start_run(session, request.task, request.auto_approve)
         return RunResponse(
             run_id=run.run_id,
             session_id=run.session_id,
@@ -174,3 +177,49 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
             run.agent.cancel()
             return CancelResponse(run_id=run_id, status="cancellation_requested")
         return CancelResponse(run_id=run_id, status="already_finished")
+
+    @app.post(
+        "/sessions/{session_id}/approvals/{approval_id}",
+        response_model=ApprovalResponse,
+    )
+    async def decide_approval(
+        session_id: str,
+        approval_id: str,
+        request: ApprovalDecisionRequest,
+    ) -> ApprovalResponse:
+        session = state.sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        request_record = session.approval_gate.decide(
+            approval_id,
+            request.approved,
+            request.approve_current_turn,
+        )
+        if request_record is None or request_record.session_id != session_id:
+            raise HTTPException(status_code=404, detail="approval request not found")
+        return ApprovalResponse(
+            approval_id=approval_id,
+            status="approved" if request.approved else "rejected",
+        )
+
+    @app.post(
+        "/sessions/{session_id}/changes/{change_id}/revert",
+        response_model=RevertChangeResponse,
+    )
+    async def revert_change(session_id: str, change_id: str) -> RevertChangeResponse:
+        session = state.sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        change = session.change_store.get(change_id)
+        if change is None:
+            raise HTTPException(status_code=404, detail="change not found")
+        was_reverted = change.reverted
+        try:
+            session.change_store.revert(change_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return RevertChangeResponse(
+            change_id=change_id,
+            status="already_reverted" if was_reverted else "reverted",
+            diff=change.diff,
+        )

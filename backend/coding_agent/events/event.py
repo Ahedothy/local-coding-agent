@@ -19,6 +19,8 @@ class AgentEventType(str, Enum):
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
     TOOL_FAILED = "tool_failed"
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVAL_RESOLVED = "approval_resolved"
     ASSISTANT_MESSAGE = "assistant_message"
     PLAN = "plan"
     REFLECTION = "reflection"
