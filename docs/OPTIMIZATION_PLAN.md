@@ -373,6 +373,35 @@ Recommended effort:
 
 ## Priority 6: Broader Tool Set
 
+### Status: Implemented (focused scope)
+
+Priority 6 is implemented with three read-only inspection tools:
+
+- `get_file_info` reports file or directory kind, byte size, UTC modification
+  time, text/binary classification, encoding, and line count when the scan is
+  within the local inspection limit.
+- `list_directory_tree` returns a deterministic, directory-first tree with
+  bounded depth and entry count, while skipping generated and metadata
+  directories such as `.git`, `node_modules`, and `__pycache__`.
+- `git_diff` reports read-only Git status and the unified diff for the selected
+  workspace scope. It applies one shared output budget to diff and status,
+  never mutates Git, and never reads `.git` metadata as a user-facing path.
+
+All three tools use Pydantic argument schemas, resolve paths through
+`Workspace`, bound their output, and are registered for both CLI and FastAPI
+Agent construction. Focused tests cover metadata, tree limits and ignore
+rules, workspace escapes, tracked and untracked changes, non-Git directories,
+and the no-`.git` output guarantee.
+
+The implementation intentionally stops at three tools. `run_tests` is not
+added as a duplicate wrapper because the existing `execute_command` already
+executes user-selected test commands locally with timeout, `shell=False`,
+workspace cwd validation, and structured exit status. `format_file` is also
+deferred because a useful formatter wrapper would need language detection,
+formatter discovery, configuration policy, and additional write-side safety
+that is not necessary for the current demo. This keeps the tool surface
+credible, deterministic, and easy to explain under the assignment boundary.
+
 Why this is lower priority:
 
 More tools can make the agent more capable, but every new tool increases safety and testing burden. Add tools only when they strengthen the demo or clearly improve coding ability.

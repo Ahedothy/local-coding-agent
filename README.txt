@@ -175,6 +175,25 @@ The web session supports multiple user turns while the browser page and backend
 process remain alive. Refreshing the page or changing the workspace creates a
 new in-memory session.
 
+Local Inspection Tools
+----------------------
+
+The Agent also has three bounded, read-only inspection tools:
+
+- `get_file_info` reports file or directory metadata, text/binary status, and
+  line count when the file is within the inspection limit.
+- `list_directory_tree` shows a compact directory-first tree with depth,
+  entry, and generated-directory ignore rules.
+- `git_diff` shows local Git status and a bounded unified diff without exposing
+  `.git` metadata or mutating the repository.
+
+These tools operate on the selected local Workspace. Every path is checked by
+the same Workspace security boundary used by the editing and command tools.
+The existing `execute_command` remains the path for running tests, so test
+commands keep one consistent timeout, cwd, shell, and exit-status policy.
+Formatter-specific execution, package installation, network browsing, and Git
+mutation are intentionally outside the current tool set.
+
 Demo Repository
 ---------------
 

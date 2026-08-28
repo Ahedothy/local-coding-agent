@@ -684,6 +684,61 @@ Do not:
 - make plan parsing a required structured model protocol
 - issue an extra model call just to create a plan
 
+## Milestone 15B: Focused Read-Only Inspection Tools
+
+Goal:
+
+- broaden the Agent's local coding awareness without adding mutation-heavy or
+  environment-dependent integrations
+
+Modules:
+
+- `backend/coding_agent/tools/inspection.py`
+- `backend/coding_agent/tools/__init__.py`
+- `backend/coding_agent/cli.py`
+- `backend/coding_agent/api/app.py`
+- `backend/tests/test_tools_inspection.py`
+
+Implemented tools:
+
+- `get_file_info(path)` returns bounded metadata for an existing file or
+  directory, including kind, size, UTC modification time, binary status,
+  encoding, and line count when safe to scan.
+- `list_directory_tree(path=".", max_depth=4, max_entries=200)` returns a
+  directory-first structured tree and text rendering with deterministic ignore
+  rules and explicit truncation reporting.
+- `git_diff(path=".", max_chars=100000)` returns read-only Git status and a
+  bounded unified diff for the workspace scope. The character budget is shared
+  by diff and status output, with explicit truncation flags.
+
+Safety and implementation rules:
+
+- every path is resolved through `Workspace`; traversal, outside paths,
+  symlink escapes, and `.git` access remain rejected
+- all arguments are validated by Pydantic models exposed in the model tool
+  schemas
+- tree traversal, metadata scanning, subprocess execution, and diff output are
+  bounded by explicit depth, entry, byte, timeout, and character limits
+- Git commands use `subprocess.run(..., shell=False)` and only read status or
+  diff; no commit, reset, checkout, push, or other Git mutation is exposed
+- inspection failures return structured `ToolResult` failures and do not
+  bypass the generic `ToolExecutor`
+
+Completion criteria:
+
+- the three tools are visible in CLI, API, SSE, and Web UI Agent registries
+- focused tests cover normal results, limits, ignored directories, workspace
+  escapes, binary files, Git changes, and non-Git workspaces
+- full backend tests and frontend build remain green
+
+Scope decision:
+
+- do not add `run_tests`; use the existing secured `execute_command` for test
+  commands and preserve one execution path
+- defer `format_file` until formatter discovery and language-specific policy
+  justify its additional write-side complexity
+- do not add package installation, network browsing, or Git mutation tools
+
 ## Milestone 16: README and Demo Script
 
 Goal:

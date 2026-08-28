@@ -135,6 +135,44 @@ Scenarios:
 - rejects blocked dangerous command
 - uses `shell=False`
 
+### Priority 6 inspection tools
+
+#### `get_file_info`
+
+Scenarios:
+
+- reports text file size, UTC modification time, UTF-8 encoding, and line count
+- reports binary files without attempting to decode them as text
+- reports directory metadata with no line count
+- marks line scanning as truncated for files above the inspection limit
+- rejects missing paths, workspace escapes, and `.git` paths
+
+#### `list_directory_tree`
+
+Scenarios:
+
+- returns deterministic directory-first entries and a readable tree
+- supports a scoped starting directory
+- respects `max_depth` and reports depth truncation
+- respects `max_entries` and reports entry truncation
+- skips `.git`, `node_modules`, `__pycache__`, build, and distribution output
+- skips symlinks and rejects paths outside the Workspace
+- rejects a file path when a directory is required
+
+#### `git_diff`
+
+Scenarios:
+
+- reports tracked modifications as a unified diff
+- reports untracked files in structured Git status
+- supports a path scope inside the Workspace
+- truncates oversized diff or status output and reports the relevant
+  `diff_truncated` or `status_truncated` flag
+- returns a structured failure for a non-Git directory
+- returns a structured failure when Git is unavailable or times out
+- does not expose `.git` metadata or provide Git mutation operations
+- rejects workspace escapes before starting a subprocess
+
 ## 3. ToolRegistry and ToolExecutor Tests
 
 Goal:

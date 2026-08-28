@@ -297,7 +297,7 @@ conversation context, or introduce SQLite.
 
 ## Tool System
 
-MVP tools:
+Core tools:
 
 - `list_files`
 - `read_file`
@@ -305,6 +305,19 @@ MVP tools:
 - `search_files`
 - `execute_command`
 - `replace_in_file`
+- `apply_patch`
+
+Read-only inspection tools:
+
+- `get_file_info`
+- `list_directory_tree`
+- `git_diff`
+
+The inspection tools are intentionally read-only. They give the model compact
+metadata, structure, and change awareness without adding Git mutation,
+package installation, network browsing, or formatter-specific execution.
+`execute_command` remains the single local command path, including for test
+commands, so command safety and result semantics do not diverge across tools.
 
 Each tool has:
 
@@ -316,6 +329,23 @@ Each tool has:
 - standardized ToolResult
 
 The model sees JSON schema generated from the same Pydantic model used for local validation. This keeps documentation, schema, and runtime validation aligned.
+
+### Inspection Tool Contracts
+
+Inspection tools follow the same `Tool` and `ToolExecutor` contract as file
+editing and command tools:
+
+- `get_file_info` scans at most a bounded number of bytes when calculating text
+  line information and reports whether the scan was truncated
+- `list_directory_tree` applies deterministic ignore rules, skips symlinks,
+  and caps both traversal depth and returned entries
+- `git_diff` executes only read-only `git diff` and `git status` subprocesses
+  with `shell=False`, a fixed timeout, and one shared bounded diff/status
+  payload
+
+Every requested path still goes through `Workspace`, and failures are returned
+as structured `ToolResult` values by the generic executor. The model receives
+the same Pydantic-generated schemas that local validation uses.
 
 ### ToolContext
 

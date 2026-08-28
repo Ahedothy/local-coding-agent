@@ -22,6 +22,7 @@ from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.command import COMMAND_TOOLS
 from coding_agent.tools.edit import EDIT_TOOLS
 from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
+from coding_agent.tools.inspection import INSPECTION_TOOLS
 from coding_agent.workspace import Workspace
 
 
@@ -92,7 +93,9 @@ def _build_event_handler(event_log: Path | None):
 
 
 def _build_agent(workspace: Workspace, provider, event_handler) -> Agent:
-    registry = ToolRegistry((*FILESYSTEM_TOOLS, *EDIT_TOOLS, *COMMAND_TOOLS))
+    registry = ToolRegistry(
+        (*FILESYSTEM_TOOLS, *INSPECTION_TOOLS, *EDIT_TOOLS, *COMMAND_TOOLS)
+    )
     session = Session(workspace_root=workspace.root)
     tool_context = ToolContext(session_id=session.session_id, workspace=workspace)
     executor = ToolExecutor(registry, event_handler=event_handler)
