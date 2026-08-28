@@ -20,6 +20,8 @@ class AgentEventType(str, Enum):
     TOOL_FINISHED = "tool_finished"
     TOOL_FAILED = "tool_failed"
     ASSISTANT_MESSAGE = "assistant_message"
+    PLAN = "plan"
+    REFLECTION = "reflection"
     CONTEXT_TRUNCATED = "context_truncated"
     CONTEXT_COMPACTED = "context_compacted"
     AGENT_FINISHED = "agent_finished"

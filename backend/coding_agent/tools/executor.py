@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -66,6 +67,7 @@ class ToolExecutor:
             )
         )
 
+        started_at = time.monotonic()
         try:
             result = await tool.execute(context, arguments)
             if not isinstance(result, ToolResult):
@@ -79,8 +81,10 @@ class ToolExecutor:
                 context,
                 _format_execution_error(exc),
                 emit_started=False,
+                duration_seconds=time.monotonic() - started_at,
             )
 
+        duration_seconds = time.monotonic() - started_at
         if normalized.success:
             await self._emit(
                 AgentEvent(
@@ -89,11 +93,20 @@ class ToolExecutor:
                     payload={
                         "tool_name": tool_call.name,
                         "tool_call_id": tool_call.id,
+                        "success": True,
+                        "output": normalized.output,
+                        "duration_seconds": duration_seconds,
                     },
                 )
             )
         else:
-            await self._emit_failure_event(tool_call, context, normalized.error or "tool failed")
+            await self._emit_failure_event(
+                tool_call,
+                context,
+                normalized.error or "tool failed",
+                output=normalized.output,
+                duration_seconds=duration_seconds,
+            )
         return normalized
 
     async def _failure(
@@ -103,6 +116,7 @@ class ToolExecutor:
         error: str,
         *,
         emit_started: bool = True,
+        duration_seconds: float | None = None,
     ) -> ToolResult:
         if emit_started:
             await self._emit(
@@ -112,7 +126,12 @@ class ToolExecutor:
                     payload={"tool_name": tool_call.name, "tool_call_id": tool_call.id},
                 )
             )
-        await self._emit_failure_event(tool_call, context, error)
+        await self._emit_failure_event(
+            tool_call,
+            context,
+            error,
+            duration_seconds=duration_seconds,
+        )
         return ToolResult(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -125,6 +144,8 @@ class ToolExecutor:
         tool_call: ToolCall,
         context: ToolContext,
         error: str,
+        output: Any | None = None,
+        duration_seconds: float | None = None,
     ) -> None:
         await self._emit(
             AgentEvent(
@@ -134,6 +155,9 @@ class ToolExecutor:
                     "tool_name": tool_call.name,
                     "tool_call_id": tool_call.id,
                     "error": error,
+                    "success": False,
+                    "output": output,
+                    "duration_seconds": duration_seconds,
                 },
             )
         )

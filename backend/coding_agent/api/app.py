@@ -26,7 +26,15 @@ SYSTEM_PROMPT = (
     "registered workspace tools. Use execute_command with an argument array, "
     "not a shell string. On Windows, run workspace-local executables with "
     ".\\program.exe. Treat a command as successful only when the tool result "
-    "has success=true, returncode=0, and the expected stdout is present."
+    "has success=true, returncode=0, and the expected stdout is present. Use "
+    "replace_in_file for one simple exact replacement. Use apply_patch for "
+    "related multi-line or multi-file edits; provide a standard unified diff "
+    "with ---/+++ file headers and @@ hunks, after reading the current files. "
+    "Do not guess when patch context does not match. For non-trivial tasks, "
+    "state a concise 1-3 bullet plan in assistant text before the first tool "
+    "call. After tool results, briefly state the next adjustment when useful; "
+    "simple tasks may proceed directly. Never claim a tool result you did not "
+    "receive."
 )
 
 

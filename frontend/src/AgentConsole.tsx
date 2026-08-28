@@ -14,6 +14,7 @@ import {
   FolderOpen,
   History,
   LoaderCircle,
+  ListChecks,
   Play,
   RotateCcw,
   Terminal,
@@ -54,6 +55,8 @@ const eventLabels: Record<string, string> = {
   tool_finished: "Tool finished",
   tool_failed: "Tool failed",
   assistant_message: "Assistant message",
+  plan: "Plan",
+  reflection: "Reflection",
   context_truncated: "Context truncated",
   context_compacted: "Context compacted",
   agent_finished: "Agent finished",
@@ -70,6 +73,7 @@ const filters: Array<{ id: Filter; label: string }> = [
 
 function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
+  if (type === "plan") return "working";
   if (["tool_finished", "agent_finished", "context_compacted"].includes(type)) return "success";
   if (["tool_failed", "agent_error"].includes(type)) return "danger";
   return "neutral";
@@ -77,6 +81,8 @@ function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
 
 function iconForEvent(type: string) {
   if (type.startsWith("tool") && type !== "tool_failed") return <Terminal size={15} />;
+  if (type === "plan") return <ListChecks size={15} />;
+  if (type === "reflection") return <RotateCcw size={15} />;
   if (type === "tool_failed" || type === "agent_error") return <XCircle size={15} />;
   if (type === "agent_finished" || type === "tool_finished") return <CheckCircle2 size={15} />;
   if (type.startsWith("model") || type === "assistant_message") return <Bot size={15} />;
@@ -98,7 +104,7 @@ function formatDuration(events: AgentEvent[]) {
 
 function eventMatchesFilter(type: string, filter: Filter) {
   if (filter === "all") return true;
-  if (filter === "model") return type.startsWith("model") || type === "assistant_message";
+  if (filter === "model") return type.startsWith("model") || ["assistant_message", "plan", "reflection"].includes(type);
   if (filter === "tools") return type.startsWith("tool");
   if (filter === "context") return type.startsWith("context");
   return type === "agent_error" || type === "tool_failed";
@@ -202,6 +208,8 @@ export default function AgentConsole() {
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("idle");
   const eventSource = useRef<EventSource | null>(null);
   const refreshInFlight = useRef(false);
+  const selectedFilePathRef = useRef<string | null>(null);
+  const previewRequestIdRef = useRef(0);
 
   useEffect(() => () => eventSource.current?.close(), []);
 
@@ -211,6 +219,10 @@ export default function AgentConsole() {
   }, [events]);
   const finalAnswer = useMemo(() => {
     const event = [...events].reverse().find((candidate) => candidate.type === "assistant_message" && readPayloadString(candidate, "content"));
+    return event ? readPayloadString(event, "content") : undefined;
+  }, [events]);
+  const latestPlan = useMemo(() => {
+    const event = [...events].reverse().find((candidate) => candidate.type === "plan" && readPayloadString(candidate, "content"));
     return event ? readPayloadString(event, "content") : undefined;
   }, [events]);
   const runStatus = useMemo(() => {
@@ -289,6 +301,11 @@ export default function AgentConsole() {
             setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
           });
         }
+        if (event.type === "tool_finished" && selectedFilePathRef.current) {
+          void selectFile(selectedFilePathRef.current, started.session_id).catch((reason) => {
+            setError(reason instanceof Error ? reason.message : "Could not refresh file preview");
+          });
+        }
         if (event.type === "agent_finished" || event.type === "agent_error") {
           setBusy(false);
           source.close();
@@ -334,6 +351,8 @@ export default function AgentConsole() {
     setWorkspaceFiles([]);
     setExpandedFolders(new Set());
     setSelectedFilePath(null);
+    selectedFilePathRef.current = null;
+    previewRequestIdRef.current += 1;
     setFilePreview(null);
     setPreviewState("idle");
     setPreviewMessage("");
@@ -345,6 +364,8 @@ export default function AgentConsole() {
     setWorkspacePhase("selecting");
     setWorkspaceFiles([]);
     setSelectedFilePath(null);
+    selectedFilePathRef.current = null;
+    previewRequestIdRef.current += 1;
     setFilePreview(null);
     setPreviewState("idle");
     setPreviewMessage("");
@@ -371,7 +392,7 @@ export default function AgentConsole() {
       const files = (await response.json()) as WorkspaceEntry[];
       setWorkspaceFiles(files);
       const firstFile = files.find((entry) => entry.kind === "file");
-      if (firstFile && !selectedFilePath) {
+      if (firstFile && !selectedFilePathRef.current) {
         window.setTimeout(() => {
           void selectFile(firstFile.path, sessionId).catch((reason) => {
             setError(reason instanceof Error ? reason.message : "Could not preview file");
@@ -386,7 +407,9 @@ export default function AgentConsole() {
 
   async function selectFile(path: string, sessionId = session?.session_id) {
     if (!sessionId) return;
+    const requestId = ++previewRequestIdRef.current;
     setSelectedFilePath(path);
+    selectedFilePathRef.current = path;
     setFilePreview(null);
     setPreviewState("loading");
     setPreviewMessage("");
@@ -394,15 +417,18 @@ export default function AgentConsole() {
       const response = await fetch(`${API_BASE}/sessions/${sessionId}/files/${path.split("/").map(encodeURIComponent).join("/")}`);
       if (!response.ok) {
         const message = await responseError(response, "Could not preview file");
+        if (requestId !== previewRequestIdRef.current) return;
         const unsupported = response.status === 415 || /binary|UTF-8|text file|not supported/i.test(message);
         setPreviewState(unsupported ? "unsupported" : "error");
         setPreviewMessage(unsupported ? "This file is not a supported UTF-8 text file." : message);
         return;
       }
       const preview = (await response.json()) as FilePreview;
+      if (requestId !== previewRequestIdRef.current) return;
       setFilePreview(preview);
       setPreviewState("ready");
     } catch (reason) {
+      if (requestId !== previewRequestIdRef.current) return;
       setPreviewState("error");
       setPreviewMessage(reason instanceof Error ? reason.message : "Could not preview file");
     }
@@ -462,10 +488,11 @@ export default function AgentConsole() {
           <div><span className="metric-label">Failures</span><strong className={failedToolCount ? "metric-danger" : ""}>{failedToolCount || "--"}</strong></div>
           <div className="metric-context"><span className="metric-label">Context budget</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div>
         </div>
+        {latestPlan && <div className="plan-panel"><div className="plan-heading"><ListChecks size={16} /><span>Current plan</span><span>Latest model plan</span></div><p>{latestPlan}</p></div>}
         {finalAnswer && !busy && <div className="answer-panel"><div className="answer-heading"><CheckCircle2 size={16} />Final answer</div><p>{finalAnswer}</p></div>}
         <div className="filter-bar" role="tablist" aria-label="Event filters">{filters.map((item) => <button key={item.id} className={`filter-tab ${filter === item.id ? "is-active" : ""}`} onClick={() => setFilter(item.id)} role="tab" aria-selected={filter === item.id}>{item.label}<span>{item.id === "all" ? events.length : events.filter((event) => eventMatchesFilter(event.type, item.id)).length}</span></button>)}</div>
         <div className="trace-grid">
-          <div className="iteration-list">{groupedEvents.length === 0 ? <div className="empty-trace"><div className="empty-icon"><Terminal size={19} /></div><h3>{events.length ? "No matching events" : "Ready when you are"}</h3><p>{events.length ? "Change the filter to inspect another part of the run." : "Open a workspace and run a task to see the model-to-tool loop here."}</p></div> : groupedEvents.map(([iteration, group]) => <section className="iteration-block" key={iteration ?? "session"}><div className="iteration-heading"><span>{iteration === null ? "Session" : `Iteration ${iteration}`}</span><span>{group.length} events</span></div>{group.map((event) => <button className={`event-row tone-${eventTone(event.type)} ${selectedEvent?.event_id === event.event_id ? "is-selected" : ""}`} key={event.event_id} onClick={() => setSelectedEvent(event)}><span className="event-icon">{iconForEvent(event.type)}</span><span className="event-main"><span className="event-title"><strong>{eventLabels[event.type] ?? event.type}</strong><time>{formatTime(event.timestamp)}</time></span>{event.type.startsWith("tool_") && <span className="tool-name">{String(event.payload.tool_name ?? "local tool")}</span>}{event.type === "assistant_message" && readPayloadString(event, "content") && <span className="event-preview">{readPayloadString(event, "content")}</span>}{(event.type === "tool_failed" || event.type === "agent_error") && readPayloadString(event, "error") && <span className="event-preview">{readPayloadString(event, "error")}</span>}</span></button>)}</section>)}</div>
+          <div className="iteration-list">{groupedEvents.length === 0 ? <div className="empty-trace"><div className="empty-icon"><Terminal size={19} /></div><h3>{events.length ? "No matching events" : "Ready when you are"}</h3><p>{events.length ? "Change the filter to inspect another part of the run." : "Open a workspace and run a task to see the model-to-tool loop here."}</p></div> : groupedEvents.map(([iteration, group]) => <section className="iteration-block" key={iteration ?? "session"}><div className="iteration-heading"><span>{iteration === null ? "Session" : `Iteration ${iteration}`}</span><span>{group.length} events</span></div>{group.map((event) => <button className={`event-row tone-${eventTone(event.type)} ${selectedEvent?.event_id === event.event_id ? "is-selected" : ""}`} key={event.event_id} onClick={() => setSelectedEvent(event)}><span className="event-icon">{iconForEvent(event.type)}</span><span className="event-main"><span className="event-title"><strong>{eventLabels[event.type] ?? event.type}</strong><time>{formatTime(event.timestamp)}</time></span>{event.type.startsWith("tool_") && <span className="tool-name">{String(event.payload.tool_name ?? "local tool")}</span>}{["assistant_message", "plan", "reflection"].includes(event.type) && readPayloadString(event, "content") && <span className="event-preview">{readPayloadString(event, "content")}</span>}{(event.type === "tool_failed" || event.type === "agent_error") && readPayloadString(event, "error") && <span className="event-preview">{readPayloadString(event, "error")}</span>}</span></button>)}</section>)}</div>
           <aside className="event-inspector"><div className="inspector-heading"><div><div className="section-kicker">Inspector</div><h3>{selectedEvent ? eventLabels[selectedEvent.type] ?? selectedEvent.type : "Select an event"}</h3></div>{selectedEvent && <button className="icon-button" onClick={copySelectedEvent} title="Copy event payload" aria-label="Copy event payload">{copied ? <Check size={15} /> : <Clipboard size={15} />}</button>}</div>{selectedEvent ? <><div className="inspector-meta"><span>{formatTime(selectedEvent.timestamp)}</span><span>{selectedEvent.iteration === null ? "session" : `iteration ${selectedEvent.iteration}`}</span></div><pre>{JSON.stringify(selectedEvent.payload, null, 2)}</pre></> : <div className="inspector-empty"><Code2 size={18} /><p>Event payloads and execution details appear here.</p></div>}</aside>
         </div>
         {busy && typeof activeTool === "string" && <div className="activity-footer"><LoaderCircle className="spin" size={14} />Working with <strong>{activeTool}</strong></div>}

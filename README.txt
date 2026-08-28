@@ -77,6 +77,31 @@ The Agent can only access files through the configured workspace. Commands are
 executed locally with a workspace working directory, `shell=False`, a timeout,
 and bounded output.
 
+Event Logs and Trace Replay
+---------------------------
+
+Record a run as JSONL by adding `--event-log`:
+
+    cd backend
+    python -m coding_agent.cli `
+      --workspace "C:\path\to\workspace" `
+      --provider real `
+      --event-log "..\event_logs\demo.jsonl" `
+      "Inspect the project, fix the failing tests, and run them again."
+
+After the run, print a readable summary and chronological replay:
+
+    python -m coding_agent.trace "..\event_logs\demo.jsonl" --timeline
+
+Use `--json` instead of the default text format when another script needs to
+consume the summary. The trace command is read-only: it parses recorded events,
+but never calls the model, executes tools, or restores a live conversation.
+
+For non-trivial tasks, the model may include a short plan before its first tool
+call and a short reflection after later tool results. These are optional event
+annotations around the existing Agent loop, and simple tasks can still go
+directly to an answer.
+
 Interactive Multi-Turn Mode
 ----------------------------
 

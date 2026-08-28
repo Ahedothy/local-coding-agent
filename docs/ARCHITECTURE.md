@@ -291,7 +291,9 @@ Required design rules:
 - Cancellation applies to the currently running turn, not to the entire conversation object.
 - Interactive CLI is only a transport wrapper. It must not implement the agent loop, tool routing, context truncation, or model parsing.
 
-MVP multi-turn should not add persistent restore, SQLite, JSONL replay, FastAPI sessions, or React chat state. In-memory conversation is enough for the next milestone and is easier to explain in an interview.
+Multi-turn conversation state remains in memory. Priority 4 adds read-only analysis
+of explicitly recorded JSONL events, but does not restore Agent state, persist
+conversation context, or introduce SQLite.
 
 ## Tool System
 
@@ -375,11 +377,23 @@ Required event types:
 - `tool_finished`
 - `tool_failed`
 - `assistant_message`
+- `plan`
+- `reflection`
 - `context_truncated`
 - `agent_finished`
 - `agent_error`
 
 Events are important because they make the agent loop visible in CLI output, Web UI streaming, JSONL logs, tests, and the final demo video.
+
+### Planning and Reflection
+
+Planning is an optional protocol around the existing model loop, not a second
+planner or Agent. When a model response contains both assistant text and tool
+calls, the first such response in a turn is emitted as `plan`; later such
+responses are emitted as `reflection`. The same text remains the normal
+assistant message sent back into ContextManager. Simple final-answer turns do
+not require a plan, and the runtime never performs an extra model call to
+generate one.
 
 ## CLI and Web Strategy
 
@@ -415,13 +429,20 @@ Chosen only for optional Phase 2 UI. The UI should visualize events, not impleme
 
 Chosen for one-way event streaming. WebSocket is not needed for MVP.
 
-### JSONL
+### JSONL and trace replay
 
-Chosen as optional event logging. SQLite is intentionally not part of MVP.
+JSONL is the optional append-only event log. The `coding_agent.trace` module reads
+that log without executing tools or restoring a live Agent. It produces a
+deterministic summary and chronological timeline for debugging and demo review.
+SQLite and session restore are intentionally out of scope.
 
-### `replace_in_file`
+### Editing tools
 
-Chosen instead of full `apply_patch` for MVP because it is stable, testable, and enough to demonstrate local code editing. Full unified diff support is a future enhancement.
+`replace_in_file` remains the small, reliable path for one exact replacement.
+`apply_patch` accepts standard unified diff text for related multi-line or
+multi-file edits. Parsing, context validation, Workspace checks, atomic writes,
+rollback, and diff reporting are implemented locally in the tool layer; no
+shell patch command or agent framework is involved.
 
 ## Final MVP Statement
 

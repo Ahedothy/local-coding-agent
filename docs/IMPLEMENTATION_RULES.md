@@ -88,11 +88,19 @@ Correct architecture is more important than adding many features.
     - The task should require reading, testing, editing, and retesting.
     - Do not rely on unpredictable long model behavior for the video.
 
-19. Do not implement full `apply_patch` in MVP.
-    - Implement `replace_in_file` first.
-    - Full unified diff support is a future enhancement.
+19. Keep patch editing local and structured.
+    - `replace_in_file` handles one simple exact replacement.
+    - `apply_patch` may accept standard unified diff text, but must validate
+      every path through `Workspace`, reject unsafe or binary edits, and keep
+      the local rollback behavior explainable and tested.
 
-20. Do not make Web UI the first deliverable.
+20. Keep planning lightweight and optional.
+    - Plan and reflection events are annotations around normal model responses.
+    - Do not introduce a separate planner, second Agent loop, or extra planning
+      model call.
+    - Simple tasks must still work without plan text.
+
+21. Do not make Web UI the first deliverable.
     - CLI-first is the required MVP path.
     - FastAPI, SSE, and React are Phase 2 after Agent Core is stable.
 

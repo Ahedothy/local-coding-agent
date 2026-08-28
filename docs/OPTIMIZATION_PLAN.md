@@ -154,6 +154,28 @@ Recommended effort:
 
 ## Priority 2: Stronger Editing Tooling
 
+### Status: Implemented
+
+The local editing toolset now includes `apply_patch` alongside the original
+`replace_in_file` tool. `apply_patch` accepts a structured JSON argument with a
+standard unified diff string containing `---`/`+++` file headers and `@@`
+hunk headers. It validates every touched path through `Workspace`, rejects
+binary and over-sized files, checks all hunks in memory before any write, and
+uses same-directory atomic replacement for each file.
+
+Multi-file patches are transactional at the tool level: if validation fails,
+no file is changed; if a later write fails, already-written files are restored.
+Successful results include touched files, hunk counts, line and byte deltas,
+a concise diff summary, and the generated standard unified diff. The same diff
+is included in the tool-finished event so it is visible in CLI and Web UI
+output. Failed results include rejected hunk diagnostics and rollback status.
+The system prompt tells the model to use
+`replace_in_file` for one simple replacement and `apply_patch` for related
+multi-line or multi-file edits.
+
+Focused coverage verifies multiple files, ordered hunks, stale context,
+workspace escapes, binary rejection, and write-failure rollback.
+
 Why this matters:
 
 The current `replace_in_file` tool is safe and easy to test, but it is limited. Real coding agents usually need patch-style edits. Adding a locally implemented patch tool would make the project look more capable while still staying within the assignment rules.
@@ -266,6 +288,8 @@ Recommended effort:
 
 ## Priority 4: Observability and Replay
 
+Status: implemented as a read-only JSONL trace and timeline viewer.
+
 Why this matters:
 
 A coding agent is easier to defend when every decision and tool result is observable. The current JSONL logger is a good start. A small replay or trace viewer would make the project feel much more mature.
@@ -285,6 +309,13 @@ Recommended improvements:
 - Add run duration and per-tool duration summaries.
 - Add tests for the trace summary using a fixture JSONL file.
 
+Implementation notes:
+
+- `python -m coding_agent.trace <event-log>` prints the summary.
+- Add `--timeline` for an event-by-event relative-time replay.
+- Add `--json` for scripts and future UI integrations.
+- Replay only parses recorded events; it never calls a model or local tool.
+
 Acceptance criteria:
 
 - A recorded run can be summarized after completion.
@@ -296,6 +327,9 @@ Recommended effort:
 - Medium value, low risk.
 
 ## Priority 5: Agent Planning and Reflection
+
+Status: implemented as optional `plan` and `reflection` events around normal
+assistant responses that include tool calls.
 
 Why this is attractive but should be scoped carefully:
 
@@ -324,6 +358,14 @@ Acceptance criteria:
 - The plan improves readability without becoming required for every small task.
 - The model can still proceed directly for simple tasks.
 - Tests remain deterministic by using mock responses.
+
+Implementation notes:
+
+- The first tool-producing response in a turn is marked as `plan` when it has
+  assistant text.
+- Later tool-producing responses with text are marked as `reflection`.
+- The text is still stored once as a normal assistant message in ContextManager.
+- The Web UI shows the latest plan above the iteration trace.
 
 Recommended effort:
 

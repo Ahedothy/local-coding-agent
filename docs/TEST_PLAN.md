@@ -107,6 +107,19 @@ Scenarios:
 - rejects binary files
 - rejects workspace escape
 
+### `apply_patch`
+
+Scenarios:
+
+- applies standard unified diff hunks to one file
+- applies a standard diff to multiple files
+- applies multiple ordered hunks to one file
+- rejects malformed diff headers and hunk line counts
+- rejects stale hunk context without changing any file
+- rejects binary files and workspace escapes
+- rolls back earlier writes when a later file write fails
+- returns the generated standard unified diff in the tool output
+
 ### `execute_command`
 
 Scenarios:
@@ -278,6 +291,22 @@ Assertions:
 - emits cancelled/finished event
 - does not continue executing tools
 
+### Planning and Reflection
+
+Mock model responses:
+
+1. returns assistant text plus a tool call
+2. returns assistant text plus another tool call
+3. returns a final answer
+
+Assertions:
+
+- the first tool-producing response emits `plan`
+- the later tool-producing response emits `reflection`
+- plan text remains in the assistant message sent into the next request
+- a direct final answer emits neither event
+- no extra model request is created solely for planning
+
 ## 7. Multi-Turn Conversation Tests
 
 Goal:
@@ -400,7 +429,25 @@ Assertions:
 - event sequence contains tool start and finish events
 - Agent finishes successfully
 
-## 10. API/SSE Tests
+## 10. Trace Summary and Replay Tests
+
+Goal:
+
+- prove that a recorded JSONL run can be inspected after completion
+
+Required scenarios:
+
+- load a valid JSONL fixture into `AgentEvent` objects
+- summarize session id, workspace, tasks, status, iterations, and tool calls
+- aggregate model usage when numeric usage fields are present
+- report command return codes and per-tool durations
+- render a readable summary and chronological timeline
+- support JSON output for machine-readable inspection
+- reject malformed JSONL with a line-specific error
+- handle an empty event sequence safely
+- never execute a model or local tool while tracing
+
+## 11. API/SSE Tests
 
 Only required if FastAPI Phase 2 is implemented.
 
@@ -414,7 +461,7 @@ Scenarios:
 
 Do not test real model calls here.
 
-## 11. Manual Real-Model Demo
+## 12. Manual Real-Model Demo
 
 Goal:
 

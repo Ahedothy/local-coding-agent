@@ -164,3 +164,25 @@ def test_executor_emits_tool_lifecycle_events(tmp_path: Path) -> None:
         AgentEventType.TOOL_STARTED,
         AgentEventType.TOOL_FINISHED,
     ]
+    assert events[-1].payload["success"] is True
+    assert events[-1].payload["output"] == {
+        "text": "hello",
+        "session_id": "session-1",
+    }
+    assert isinstance(events[-1].payload["duration_seconds"], float)
+
+
+def test_executor_emits_structured_output_for_failed_tool(tmp_path: Path) -> None:
+    events = []
+    executor = ToolExecutor(ToolRegistry([RaisingTool()]), event_handler=events.append)
+
+    asyncio.run(
+        executor.execute(
+            ToolCall(id="call-1", name="raise_error", arguments={"text": "hello"}),
+            make_context(tmp_path),
+        )
+    )
+
+    assert events[-1].type is AgentEventType.TOOL_FAILED
+    assert events[-1].payload["success"] is False
+    assert events[-1].payload["output"] is None

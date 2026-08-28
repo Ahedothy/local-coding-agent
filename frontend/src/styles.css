@@ -61,6 +61,10 @@ input::placeholder, textarea::placeholder { color: #62717b; }
 .answer-panel { margin: 24px 0 12px; border-left: 3px solid #67d0a4; background: #172a27; padding: 16px 18px; }
 .answer-heading { display: flex; align-items: center; gap: 8px; color: #8fe2c2; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .1em; }
 .answer-panel p { color: #dce8e4; font-size: 13px; line-height: 1.65; margin: 10px 0 0; white-space: pre-wrap; }
+.plan-panel { margin: 21px 0 12px; border: 1px solid #356250; background: #172a27; padding: 14px 16px; }
+.plan-heading { display: flex; align-items: center; gap: 8px; color: #8fe2c2; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.plan-heading span:last-child { margin-left: auto; color: #71808a; font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.plan-panel p { margin: 10px 0 0; color: #b7cbc4; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
 .trace-list { max-width: 920px; }
 .empty-trace { min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: #71808a; }
 .empty-icon { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid #35414a; background: #161f26; color: #75c9ae; border-radius: 8px; margin-bottom: 17px; }
@@ -159,6 +163,7 @@ pre { overflow-x: auto; color: #9aa8af; background: #11181e; border: 1px solid #
   .metric-strip { grid-template-columns: repeat(2, 1fr); }
   .metric-context { grid-column: span 2; }
 }
+@media (max-width: 680px) {
   .topbar { padding: 0 20px; height: 66px; }
   .workspace-layout { display: block; }
   .control-panel { border-right: 0; border-bottom: 1px solid #27313a; padding: 36px 20px 34px; }
@@ -236,6 +241,10 @@ textarea:focus, .input-with-icon:focus-within { border-color: #59a98d; box-shado
 .answer-panel { background: #e7f5ef; border-color: #2c9b76; }
 .answer-heading { color: #176b56; }
 .answer-panel p { color: #31564b; }
+.plan-panel { background: #f0f8f4; border-color: #b9dfd0; }
+.plan-heading { color: #176b56; }
+.plan-heading span:last-child { color: #84909a; }
+.plan-panel p { color: #31564b; }
 .context-status { color: #247b63; }
 .activity-footer strong { color: #176b56; }
 .console-shell .footer-bar { background: #ffffff; border-color: #e2e8ee; }

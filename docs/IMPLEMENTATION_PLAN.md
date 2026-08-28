@@ -32,7 +32,8 @@ Completion criteria:
 
 - the docs clearly forbid Agent frameworks and Agent SDKs
 - the docs clearly say that MVP is CLI-first
-- the docs clearly remove SQLite, summary compaction, full apply_patch, and multi-provider support from MVP
+- the docs clearly remove SQLite and multi-provider support from MVP; context
+  compaction and standard local unified-diff editing are completed upgrades
 
 Do not:
 
@@ -213,19 +214,20 @@ Do not:
 - implement complex `.gitignore` behavior
 - read or write `.git`
 
-## Milestone 6: `replace_in_file` Tool
+## Milestone 6: Local Editing Tools
 
 Goal:
 
-- provide a stable local code editing tool for the demo
+- provide stable local code editing tools for the demo
 
 Module:
 
 - `backend/coding_agent/tools/edit.py`
 
-Tool:
+Tools:
 
 - `replace_in_file`
+- `apply_patch`
 
 Parameters:
 
@@ -233,6 +235,7 @@ Parameters:
 - `old_text`
 - `new_text`
 - `expected_replacements`, default `1`
+- `apply_patch` receives a standard unified diff string
 
 Completion criteria:
 
@@ -242,6 +245,9 @@ Completion criteria:
 - expected replacement count is enforced
 - binary file edits are rejected
 - workspace escape is rejected
+- standard unified-diff `apply_patch` supports existing-file multi-line and
+  multi-file edits with context validation, atomic writes, rollback, and diff
+  reporting
 
 Tests:
 
@@ -251,9 +257,12 @@ Tests:
 - expected count behavior
 - path security
 
-Do not:
+Related Priority 2 upgrade:
 
-- implement full unified diff `apply_patch` in MVP
+- `apply_patch` accepts standard `---`/`+++` file headers and `@@` hunks
+- the tool returns a standard unified diff for the applied changes
+- all patch files are prevalidated before writes; later write failures trigger
+  rollback of earlier writes
 
 ## Milestone 7: `execute_command` Tool
 
@@ -616,27 +625,64 @@ Do not:
 - let multi-turn demo replace the main bug-fix demo
 - make the 2-minute video depend on long conversation
 
-## Milestone 15: Optional JSONL Event Log
+## Milestone 15: Observability and Read-Only Trace Replay
 
 Goal:
 
-- make debugging and video review easier
+- make debugging and video review easier without changing Agent execution
 
 Module:
 
 - `backend/coding_agent/events/jsonl_store.py`
+- `backend/coding_agent/trace.py`
 
 Completion criteria:
 
 - each AgentEvent is written as one JSON line
 - logging failure does not crash the Agent
 - event logs are ignored by Git
+- model response events include usage and provider metadata when available
+- model, tool, and Agent turn durations are observable
+- `python -m coding_agent.trace <event-log>` prints a readable summary
+- `--timeline` provides a chronological read-only replay of events
+- `--json` provides a machine-readable summary
+- trace parsing has fixture-based tests
 
 Do not:
 
 - implement SQLite
-- implement replay
 - implement session restore
+- re-execute tools during replay
+
+## Milestone 15A: Optional Agent Planning and Reflection
+
+Goal:
+
+- make non-trivial model/tool work easier to understand without adding a
+  separate planning subsystem
+
+Modules:
+
+- `backend/coding_agent/agent/runtime.py`
+- `backend/coding_agent/events/event.py`
+- `frontend/src/AgentConsole.tsx`
+
+Completion criteria:
+
+- the system prompt asks for a concise plan only for non-trivial tasks
+- the first assistant response with tool calls emits an optional `plan` event
+- later assistant responses with tool calls emit `reflection` events
+- plan and reflection text remains in the normal assistant context message
+- simple final-answer tasks do not require a plan
+- Web UI displays the latest plan above the iteration trace
+- CLI and SSE expose the same events without implementing orchestration there
+- mock tests cover plan, reflection, and direct-answer paths
+
+Do not:
+
+- add a second planner or Agent loop
+- make plan parsing a required structured model protocol
+- issue an extra model call just to create a plan
 
 ## Milestone 16: README and Demo Script
 

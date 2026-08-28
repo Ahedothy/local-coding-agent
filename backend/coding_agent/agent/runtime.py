@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -69,6 +70,8 @@ class Agent:
         self._session_started = False
         self._iterations = 0
         self._tool_calls = 0
+        self._plan_emitted = False
+        self._turn_started_at: float | None = None
 
         if self.tool_executor.event_handler is None and event_handler is not None:
             self.tool_executor.event_handler = event_handler
@@ -96,6 +99,8 @@ class Agent:
         """Execute a turn after exclusive ownership has been acquired."""
         self._iterations = 0
         self._tool_calls = 0
+        self._plan_emitted = False
+        self._turn_started_at = time.monotonic()
         self._turn_index += 1
         self.session.task = user_message
         self.session.status = SessionStatus.RUNNING
@@ -200,6 +205,7 @@ class Agent:
                 )
             )
 
+            model_started_at = time.monotonic()
             try:
                 response = await asyncio.wait_for(
                     self.model_provider.complete(request),
@@ -224,6 +230,10 @@ class Agent:
                     payload={
                         "has_content": bool(response.content),
                         "tool_call_count": len(response.tool_calls),
+                        "finish_reason": response.finish_reason,
+                        "usage": response.usage,
+                        "model_metadata": response.raw_metadata,
+                        "duration_seconds": time.monotonic() - model_started_at,
                     },
                 )
             )
@@ -242,6 +252,25 @@ class Agent:
                     },
                 )
             )
+            if response.content and response.content.strip() and response.tool_calls:
+                is_initial_plan = not self._plan_emitted
+                await self._emit(
+                    AgentEvent(
+                        type=(
+                            AgentEventType.PLAN
+                            if is_initial_plan
+                            else AgentEventType.REFLECTION
+                        ),
+                        session_id=self.session.session_id,
+                        iteration=iteration,
+                        payload={
+                            "content": response.content,
+                            "turn_index": self._turn_index,
+                            "tool_call_count": len(response.tool_calls),
+                        },
+                    )
+                )
+                self._plan_emitted = True
             await self._emit_context_truncated(truncated, iteration)
 
             if not response.tool_calls:
@@ -341,13 +370,22 @@ class Agent:
     async def _finalize(self, result: AgentRunResult) -> AgentRunResult:
         self.session.status = SessionStatus.IDLE
         self.session.updated_at = datetime.now(timezone.utc)
+        duration_seconds = (
+            time.monotonic() - self._turn_started_at
+            if self._turn_started_at is not None
+            else None
+        )
         if result.status in {SessionStatus.FAILED, SessionStatus.CANCELLED}:
             await self._emit(
                 AgentEvent(
                     type=AgentEventType.AGENT_ERROR,
                     session_id=self.session.session_id,
                     iteration=self._iterations or None,
-                    payload={"error": result.error},
+                    payload={
+                        "error": result.error,
+                        "turn_index": self._turn_index,
+                        "duration_seconds": duration_seconds,
+                    },
                 )
             )
         await self._emit(
@@ -360,6 +398,8 @@ class Agent:
                     "iterations": result.iterations,
                     "tool_calls": result.tool_calls,
                     "error": result.error,
+                    "turn_index": self._turn_index,
+                    "duration_seconds": duration_seconds,
                 },
             )
         )

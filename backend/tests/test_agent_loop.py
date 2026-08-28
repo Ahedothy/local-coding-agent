@@ -48,7 +48,9 @@ def test_agent_success_path_executes_tool_and_returns_final_answer(tmp_path: Pat
                         name="read_file",
                         arguments={"path": "main.py"},
                     )
-                ]
+                ],
+                usage={"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+                raw_metadata={"model": "mock-model"},
             ),
             ModelResponse(content="I inspected main.py successfully."),
         ],
@@ -64,6 +66,83 @@ def test_agent_success_path_executes_tool_and_returns_final_answer(tmp_path: Pat
     assert provider.requests[1].messages[-1].role == "tool"
     assert [event.type for event in events].count(AgentEventType.TOOL_STARTED) == 1
     assert AgentEventType.AGENT_FINISHED in [event.type for event in events]
+    model_response = next(
+        event for event in events if event.type is AgentEventType.MODEL_RESPONSE
+    )
+    assert model_response.payload["usage"] == {
+        "prompt_tokens": 12,
+        "completion_tokens": 4,
+        "total_tokens": 16,
+    }
+    assert model_response.payload["model_metadata"] == {"model": "mock-model"}
+    assert isinstance(model_response.payload["duration_seconds"], float)
+    finished = next(
+        event for event in events if event.type is AgentEventType.AGENT_FINISHED
+    )
+    assert isinstance(finished.payload["duration_seconds"], float)
+
+
+def test_agent_emits_plan_then_reflection_for_nontrivial_tool_turn(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    agent, provider, events = make_agent(
+        tmp_path,
+        [
+            ModelResponse(
+                content="Plan:\n- inspect the source\n- run a focused check",
+                tool_calls=[
+                    ToolCall(
+                        id="read-source",
+                        name="read_file",
+                        arguments={"path": "main.py"},
+                    )
+                ],
+            ),
+            ModelResponse(
+                content="The source is minimal; I will verify the workspace next.",
+                tool_calls=[
+                    ToolCall(
+                        id="list-workspace",
+                        name="list_files",
+                        arguments={},
+                    )
+                ],
+            ),
+            ModelResponse(content="The inspection is complete."),
+        ],
+    )
+
+    result = run(agent, "Inspect the source and verify the workspace.")
+
+    assert result.status == SessionStatus.COMPLETED
+    planning_events = [
+        event
+        for event in events
+        if event.type in {AgentEventType.PLAN, AgentEventType.REFLECTION}
+    ]
+    assert [event.type for event in planning_events] == [
+        AgentEventType.PLAN,
+        AgentEventType.REFLECTION,
+    ]
+    assert planning_events[0].payload["content"].startswith("Plan:")
+    assert planning_events[1].payload["content"].startswith("The source is minimal")
+    assert provider.requests[1].messages[-2].content.startswith("Plan:")
+
+
+def test_agent_does_not_emit_plan_for_simple_final_response(tmp_path: Path) -> None:
+    agent, _, events = make_agent(
+        tmp_path,
+        [ModelResponse(content="A direct answer is enough.")],
+    )
+
+    result = run(agent, "Say hello.")
+
+    assert result.status == SessionStatus.COMPLETED
+    assert not any(
+        event.type in {AgentEventType.PLAN, AgentEventType.REFLECTION}
+        for event in events
+    )
 
 
 def test_agent_returns_tool_failure_to_model_and_can_finish(tmp_path: Path) -> None:
