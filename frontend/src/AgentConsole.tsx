@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from "react";
 import {
-  ArrowLeftRight,
+  FolderCog,
   BrainCircuit,
   Bot,
   CheckCircle2,
@@ -14,7 +14,6 @@ import {
   FileWarning,
   FileCode2,
   FolderOpen,
-  History,
   LoaderCircle,
   ListChecks,
   RotateCcw,
@@ -739,7 +738,7 @@ export default function AgentConsole() {
 
   async function runTask() {
     const submittedTask = task.trim();
-    if (!session || !submittedTask) return;
+    if (!session || workspacePhase !== "idle" || !submittedTask) return;
     setError(null);
     if (answerTimer.current !== null) {
       window.clearInterval(answerTimer.current);
@@ -851,50 +850,22 @@ export default function AgentConsole() {
     }
   }
 
-  function resetSession() {
-    eventSource.current?.close();
-    if (answerTimer.current !== null) {
-      window.clearInterval(answerTimer.current);
-      answerTimer.current = null;
-    }
-    setSession(null);
-    setRun(null);
-    setEvents([]);
-    setExpandedActivityTurns(new Set());
-    setTask("");
-    setError(null);
-    setBusy(false);
-    setDisplayedAnswer("");
-    setAnswerStreaming(false);
-    setPendingApproval(null);
-    setApprovalBusy(false);
-    setRevertedChanges(new Set());
-    setWorkspaceFiles([]);
-    setExpandedFolders(new Set());
-    setSelectedFilePath(null);
-    selectedFilePathRef.current = null;
-    previewRequestIdRef.current += 1;
-    setFilePreview(null);
-    setPreviewState("idle");
-    setPreviewMessage("");
-    setWorkspacePhase("idle");
-  }
-
   async function chooseDirectory() {
     setError(null);
     setWorkspacePhase("selecting");
-    setWorkspaceFiles([]);
-    setSelectedFilePath(null);
-    selectedFilePathRef.current = null;
-    previewRequestIdRef.current += 1;
-    setFilePreview(null);
-    setPreviewState("idle");
-    setPreviewMessage("");
+
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       const response = await fetch(`${API_BASE}/workspaces/select`);
       if (!response.ok) throw new Error(await responseError(response, "Could not choose workspace"));
       const selection = (await response.json()) as { workspace_root: string };
+      setWorkspaceFiles([]);
+      setSelectedFilePath(null);
+      selectedFilePathRef.current = null;
+      previewRequestIdRef.current += 1;
+      setFilePreview(null);
+      setPreviewState("idle");
+      setPreviewMessage("");
       setWorkspacePhase("loading");
       setWorkspaceRoot(selection.workspace_root);
       await createSession(selection.workspace_root);
@@ -1013,16 +984,16 @@ export default function AgentConsole() {
 
     <main className="console-layout" style={layoutStyle}>
       {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Workspace panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show workspace" aria-label="Show workspace"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Workspace and run controls">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Workspace</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={resetSession} title="Change workspace" aria-label="Change workspace" disabled={!session}><ArrowLeftRight size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
-        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><LoaderCircle className="spin" size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading workspace...</> : <><FolderOpen size={16} />Choose folder</>}</button> : <div className="session-bar"><span title={session.workspace_root}>{workspaceRoot || session.workspace_root}</span></div>}
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Workspace</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="Choose another workspace" aria-label="Change workspace" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
+        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading workspace...</> : <><FolderOpen size={16} />Choose folder</>}</button> : <div className="session-bar"><span title={session.workspace_root}>{workspaceRoot || session.workspace_root}</span></div>}
         {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>No folder selected</strong><small>Choose a local folder to get started.</small></span></div>}
-        {workspacePhase !== "idle" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{workspacePhase === "selecting" ? "Selecting a local folder..." : "Scanning local workspace..."}</span></div>}
+        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>Scanning local workspace...</span></div>}
         {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} files · {workspaceFiles.filter((entry) => entry.kind === "directory").length} folders</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">Showing first 120 entries</div>}</div>}
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
         </>}</div>
-        <div className="rail-section history-section"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker"><History size={12} />Recent tasks</span></button>{historyExpanded && <>{history.length === 0 ? <p className="history-empty">Completed tasks will appear here.</p> : <div className="history-list">{history.map((item) => <button className="history-item" key={`${item.timestamp}-${item.task}`} onClick={() => setTask(item.task)}><span>{item.task}</span><time>{new Date(item.timestamp).toLocaleDateString()}</time></button>)}</div>}</>}</div>
+        <div className="rail-section history-section"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Recent tasks</span></button>{historyExpanded && <>{history.length === 0 ? <p className="history-empty">Completed tasks will appear here.</p> : <div className="history-list">{history.map((item) => <button className="history-item" key={`${item.timestamp}-${item.task}`} onClick={() => setTask(item.task)}><span>{item.task}</span><time>{new Date(item.timestamp).toLocaleDateString()}</time></button>)}</div>}</>}</div>
       </aside>}
-      <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"><span className="resizer-handle" /></div>
+      <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"></div>
 
       <section className="trace-workbench" aria-label="Agent conversation">
         <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">Conversation</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{session ? runStatus : "workspace required"}</div></div></div><div className="context-budget-compact" title="Current context usage"><span>Context</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div>
@@ -1060,16 +1031,16 @@ export default function AgentConsole() {
             </div>;
           })}
           {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />Preparing activity</div>}
-          {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a workspace first</h3><p>Select a real local folder to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><LoaderCircle className="spin" size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading workspace...</> : <><FolderOpen size={14} />Choose folder</>}</button></div>}
+        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a workspace first</h3><p>Select a real local folder to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading workspace...</> : <><FolderOpen size={14} />Choose folder</>}</button></div>}
           {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>Ready when you are</h3><p>Send a task and follow the Agent from intent to local tools to final answer.</p></div>}
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
 
-        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy} /><ShieldCheck size={14} /><span>Auto-approve local actions</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "Enabled for sent messages" : "Manual approval"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">Message the agent</label><div className="composer-input-shell"><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="Message the agent. Press Enter to send and Ctrl+Enter for a new line." placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "Cancel agent run" : "Send message"} title={busy ? "Cancel agent run" : "Send message"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "Cancel" : "Send"}</button></div></div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>Auto-approve local actions</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "Enabled for sent messages" : "Manual approval"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">Message the agent</label><div className="composer-input-shell"><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="Message the agent. Press Enter to send and Ctrl+Enter for a new line." placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "Cancel agent run" : "Send message"} title={busy ? "Cancel agent run" : "Send message"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "Cancel" : "Send"}</button></div></div>
       </section>
 
-      <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="Resize preview panel"><span className="resizer-handle" /></div>
-      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="File preview collapsed"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="Show preview" aria-label="Show preview"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">File preview</div><h3>{filePreview?.path ?? selectedFilePath ?? "No file"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="Hide preview panel" aria-label="Hide preview panel"><ChevronRight size={15} /></button>{previewState === "unsupported" || previewState === "error" ? <FileWarning size={17} /> : <FileCode2 size={17} />}</span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>}
+      <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="Resize preview panel"></div>
+      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="File preview collapsed"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="Show preview" aria-label="Show preview"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">File preview</div><h3>{filePreview?.path ?? selectedFilePath ?? "No file"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="Hide preview panel" aria-label="Hide preview panel"><ChevronRight size={15} /></button></span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>}
     </main>
   </div>;
 }

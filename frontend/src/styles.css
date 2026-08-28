@@ -268,7 +268,9 @@ textarea:focus, .input-with-icon:focus-within { border-color: #59a98d; box-shado
 .folder-chevron.is-open { transform: rotate(90deg); }
 .tree-children { display: block; }
 .history-item span, .tree-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-item time { margin-left: auto; color: #a0abb3; font-size: 9px; white-space: nowrap; }
+.history-item { overflow: hidden; }
+.history-item > span { flex: 1 1 auto; }
+.history-item time { flex: 0 0 auto; margin-left: auto; color: #a0abb3; font-size: 9px; white-space: nowrap; }
 .workspace-tree { max-height: 250px; overflow: auto; margin-top: 12px; padding-top: 8px; border-top: 1px solid #edf1f3; }
 .tree-caption, .tree-more { padding: 0 8px 6px; color: #8a969f; font-size: 9px; }
 .tree-more { padding-top: 5px; }
@@ -351,7 +353,6 @@ body { overflow: hidden; }
 .pane-resizer { display: grid; place-items: center; width: 4px; min-width: 4px; color: #c4cdd2; background: #f6f8f9; border-left: 1px solid #edf1f3; border-right: 1px solid #edf1f3; cursor: col-resize; touch-action: none; user-select: none; }
 .pane-resizer:hover { color: #74b49f; background: #edf7f3; }
 .pane-resizer.is-hidden { cursor: default; opacity: .35; }
-.resizer-handle { display: block; width: 1px; height: 34px; border-radius: 2px; background: currentColor; opacity: .65; }
 .panel-heading-actions { display: inline-flex; align-items: center; gap: 2px; }
 .collapsed-pane { display: flex; align-items: flex-start; justify-content: center; padding: 14px 0; overflow: hidden; }
 .collapsed-pane-button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid #dce5e9; border-radius: 6px; color: #71808c; background: #ffffff; }
