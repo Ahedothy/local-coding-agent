@@ -13,6 +13,27 @@ class CreateSessionRequest(BaseModel):
     workspace_root: Path
 
 
+class DirectorySelectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_root: Path
+
+
+class WorkspaceFileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    content: str
+    truncated: bool = False
+
+
+class WorkspaceEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    kind: str
+
+
 class SessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

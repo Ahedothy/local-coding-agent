@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
 
@@ -11,11 +14,32 @@ from .app import ApiState, RunRecord
 from .schemas import (
     CancelResponse,
     CreateSessionRequest,
+    DirectorySelectionResponse,
     RunRequest,
     RunResponse,
     SessionResponse,
+    WorkspaceEntryResponse,
+    WorkspaceFileResponse,
 )
 from coding_agent.workspace import Workspace
+
+
+def _scan_workspace_entries(root: Path) -> list[WorkspaceEntryResponse]:
+    entries: list[WorkspaceEntryResponse] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if ".git" in {part.casefold() for part in relative.parts}:
+            continue
+        entries.append(
+            WorkspaceEntryResponse(
+                path=relative.as_posix(),
+                kind="directory" if path.is_dir() else "file",
+            )
+        )
+    return sorted(
+        entries,
+        key=lambda entry: (entry.path.count("/"), entry.kind != "directory", entry.path.casefold()),
+    )[:1000]
 
 
 def _sse_message(event: AgentEvent) -> str:
@@ -54,6 +78,49 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
             session_id=session.session_id,
             workspace_root=session.workspace.root,
         )
+
+    @app.get("/workspaces/select", response_model=DirectorySelectionResponse)
+    async def select_workspace() -> DirectorySelectionResponse:
+        """Open a native folder picker on the same machine as the API server."""
+        def choose() -> str:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = filedialog.askdirectory(title="Choose a local coding workspace")
+            root.destroy()
+            return selected
+
+        selected = await asyncio.to_thread(choose)
+        if not selected:
+            raise HTTPException(status_code=400, detail="no workspace selected")
+        try:
+            workspace = Workspace(selected)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return DirectorySelectionResponse(workspace_root=workspace.root)
+
+    @app.get("/sessions/{session_id}/files", response_model=list[WorkspaceEntryResponse])
+    async def list_session_files(session_id: str) -> list[WorkspaceEntryResponse]:
+        session = state.sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return await asyncio.to_thread(_scan_workspace_entries, session.workspace.root)
+
+    @app.get("/sessions/{session_id}/files/{file_path:path}", response_model=WorkspaceFileResponse)
+    async def read_session_file(session_id: str, file_path: str) -> WorkspaceFileResponse:
+        session = state.sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        try:
+            path = session.workspace.ensure_readable_file(file_path)
+            content = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        truncated = len(content) > 100_000
+        return WorkspaceFileResponse(path=file_path, content=content[:100_000], truncated=truncated)
 
     @app.post(
         "/sessions/{session_id}/runs",

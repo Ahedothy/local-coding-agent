@@ -189,6 +189,46 @@ Recommended effort:
 
 ## Priority 3: Web UI Upgrade
 
+### Status: Implemented
+
+The Web UI now presents an operational run console centered on the Agent loop:
+
+- events are grouped by iteration rather than shown as one undifferentiated list
+- the run header shows status, run id, duration, iterations, tool calls, failures,
+  and context budget utilization
+- event filters cover All, Model, Tools, Context, and Errors
+- selecting an event opens a payload inspector with a copy action
+- assistant final answers, active tools, context compaction, empty states, and
+  failure states have dedicated visual treatments
+- the layout remains usable on narrow screens by stacking the inspector below
+  the event list
+- the main shell uses a light three-pane layout with a collapsible workspace
+  tree and recent-task history on the left, the conversation/run monitor in the
+  center, and file preview on the right
+- the local API server opens a native directory picker on the same machine and
+  returns the selected path; subsequent Agent tools operate on that original
+  directory, with no browser upload or temporary copy
+
+The Workspace API now returns both directories and files. The frontend refreshes
+the tree after each tool completion or failure and again at run completion, so
+new files and folders created by the Agent appear during the same run.
+
+The implementation uses `GET /workspaces/select` with a native Windows folder
+dialog on the local API process. This keeps the browser UI free of manual path
+entry while preserving the original local Workspace security boundary. The
+previous browser-upload implementation was removed.
+
+The refresh path is optimized by scanning the local Workspace in a worker
+thread, rendering the tree before the first file preview is loaded, and using
+a short in-flight guarded polling interval during active runs. The frontend
+renders a nested flat-row tree with collapsed folders and folder-first sorting
+at each level.
+
+Implementation is split into `frontend/src/AgentConsole.tsx` and the existing
+stylesheet. TypeScript validation passes with `frontend/node_modules/.bin/tsc.cmd
+--noEmit`. Vite build verification requires write access to Vite and TypeScript
+cache directories under `frontend/node_modules`, which is environment-specific.
+
 Why this matters:
 
 The current Web UI already demonstrates SSE events. The next UI work should make the agent loop more legible, not merely prettier. The video should let evaluators immediately see model requests, tool calls, local execution, context changes, and final result.
