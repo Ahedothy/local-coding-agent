@@ -116,7 +116,20 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
             raise HTTPException(status_code=404, detail="session not found")
         try:
             path = session.workspace.ensure_readable_file(file_path)
-            content = path.read_text(encoding="utf-8")
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                    detail="file is not a supported UTF-8 text file",
+                ) from exc
+            if "\x00" in content[:8_192]:
+                raise HTTPException(
+                    status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                    detail="binary file preview is not supported",
+                )
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         truncated = len(content) > 100_000

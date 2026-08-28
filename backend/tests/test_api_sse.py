@@ -151,3 +151,30 @@ def test_api_cancel_requests_agent_cancellation(tmp_path: Path) -> None:
         "cancellation_requested",
         "already_finished",
     }
+
+
+def test_api_file_preview_distinguishes_text_and_binary_files(tmp_path: Path) -> None:
+    text_file = tmp_path / "notes.txt"
+    binary_file = tmp_path / "image.bin"
+    text_file.write_text("hello\nworld\n", encoding="utf-8")
+    binary_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x01")
+    app = create_app(make_factory([]))
+
+    async def scenario() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (
+                await client.post(
+                    "/sessions", json={"workspace_root": str(tmp_path)}
+                )
+            ).json()["session_id"]
+            text_response = await client.get(f"/sessions/{session_id}/files/notes.txt")
+            binary_response = await client.get(f"/sessions/{session_id}/files/image.bin")
+            return text_response, binary_response
+
+    text_response, binary_response = asyncio.run(scenario())
+
+    assert text_response.status_code == 200
+    assert text_response.json()["content"] == "hello\nworld\n"
+    assert binary_response.status_code == 415
+    assert "supported" in binary_response.json()["detail"]

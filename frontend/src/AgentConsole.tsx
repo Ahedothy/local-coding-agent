@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import {
   Bot,
   Check,
@@ -9,6 +9,7 @@ import {
   Clipboard,
   Clock3,
   Code2,
+  FileWarning,
   FileCode2,
   FolderOpen,
   History,
@@ -37,9 +38,10 @@ type ContextStats = {
   utilization?: number;
   compaction_count?: number;
 };
-type FilePreview = { path: string; content: string };
+type FilePreview = { path: string; content: string; truncated?: boolean };
 type WorkspaceEntry = { path: string; kind: "file" | "directory" };
 type WorkspacePhase = "idle" | "selecting" | "loading";
+type PreviewState = "idle" | "loading" | "ready" | "unsupported" | "error";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const eventLabels: Record<string, string> = {
@@ -107,11 +109,84 @@ function readPayloadString(event: AgentEvent, key: string) {
   return typeof value === "string" ? value : undefined;
 }
 
+const languageByExtension: Record<string, string> = {
+  c: "C",
+  cc: "C++",
+  cpp: "C++",
+  css: "CSS",
+  csv: "CSV",
+  go: "Go",
+  h: "C header",
+  hpp: "C++ header",
+  html: "HTML",
+  java: "Java",
+  js: "JavaScript",
+  json: "JSON",
+  jsx: "JSX",
+  md: "Markdown",
+  py: "Python",
+  rs: "Rust",
+  sh: "Shell",
+  sql: "SQL",
+  toml: "TOML",
+  ts: "TypeScript",
+  tsx: "TSX",
+  txt: "Text",
+  xml: "XML",
+  yaml: "YAML",
+  yml: "YAML",
+};
+
+function previewLanguage(path: string) {
+  const fileName = path.split("/").at(-1)?.toLowerCase() ?? "";
+  if (fileName === "dockerfile") return "Dockerfile";
+  if (fileName === "makefile") return "Makefile";
+  const extension = fileName.split(".").at(-1) ?? "";
+  return languageByExtension[extension] ?? "Plain text";
+}
+
+function highlightCodeLine(line: string, language: string): ReactNode[] {
+  if (language === "Plain text" || language === "CSV" || language === "Markdown") return [line];
+  const tokenPattern = /\/\/.*$|\/\*.*?\*\/|<!--.*?-->|^\s*#.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b[0-9]+(?:\.[0-9]+)?\b|[A-Za-z_$][\w$]*(?=\s*\()|\b(?:async|await|break|case|catch|class|const|continue|def|else|export|extends|false|finally|for|from|function|if|implements|import|in|interface|let|new|null|not|or|private|public|return|static|this|throw|true|try|type|undefined|var|void|while|with|yield)\b/g;
+  const keywordPattern = /^(?:async|await|break|case|catch|class|const|continue|def|else|export|extends|false|finally|for|from|function|if|implements|import|in|interface|let|new|null|not|or|private|public|return|static|this|throw|true|try|type|undefined|var|void|while|with|yield)$/;
+  const tokens: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(line)) !== null) {
+    if (match.index > cursor) tokens.push(line.slice(cursor, match.index));
+    const token = match[0];
+    const className = token.startsWith("//") || token.startsWith("/*") || token.startsWith("<!--") || /^\s*#/.test(token)
+      ? "syntax-comment"
+      : /^[\"'`]/.test(token)
+        ? "syntax-string"
+        : /^\d/.test(token)
+          ? "syntax-number"
+          : keywordPattern.test(token)
+            ? "syntax-keyword"
+            : "syntax-function";
+    tokens.push(<span className={className} key={`${match.index}-${token}`}>{token}</span>);
+    cursor = match.index + token.length;
+  }
+  if (cursor < line.length) tokens.push(line.slice(cursor));
+  return tokens.length ? tokens : [line];
+}
+
+function CodePreview({ preview }: { preview: FilePreview }): ReactElement {
+  const language = previewLanguage(preview.path);
+  const lines = preview.content.split(/\r?\n/);
+  return <div className="file-preview-content">
+    <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} lines{preview.truncated ? " · truncated" : ""}</span></div>
+    <div className="code-frame"><ol className="code-lines">{lines.map((line, index) => <li key={index}><span className="line-number">{index + 1}</span><code>{highlightCodeLine(line, language)}</code></li>)}</ol></div>
+  </div>;
+}
+
 export default function AgentConsole() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceEntry[]>([]);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewState>("idle");
+  const [previewMessage, setPreviewMessage] = useState("");
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [task, setTask] = useState("");
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -260,6 +335,8 @@ export default function AgentConsole() {
     setExpandedFolders(new Set());
     setSelectedFilePath(null);
     setFilePreview(null);
+    setPreviewState("idle");
+    setPreviewMessage("");
     setWorkspacePhase("idle");
   }
 
@@ -269,6 +346,8 @@ export default function AgentConsole() {
     setWorkspaceFiles([]);
     setSelectedFilePath(null);
     setFilePreview(null);
+    setPreviewState("idle");
+    setPreviewMessage("");
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       const response = await fetch(`${API_BASE}/workspaces/select`);
@@ -307,11 +386,26 @@ export default function AgentConsole() {
 
   async function selectFile(path: string, sessionId = session?.session_id) {
     if (!sessionId) return;
-    const response = await fetch(`${API_BASE}/sessions/${sessionId}/files/${path.split("/").map(encodeURIComponent).join("/")}`);
-    if (!response.ok) throw new Error(await responseError(response, "Could not preview file"));
-    const preview = (await response.json()) as { path: string; content: string };
     setSelectedFilePath(path);
-    setFilePreview(preview);
+    setFilePreview(null);
+    setPreviewState("loading");
+    setPreviewMessage("");
+    try {
+      const response = await fetch(`${API_BASE}/sessions/${sessionId}/files/${path.split("/").map(encodeURIComponent).join("/")}`);
+      if (!response.ok) {
+        const message = await responseError(response, "Could not preview file");
+        const unsupported = response.status === 415 || /binary|UTF-8|text file|not supported/i.test(message);
+        setPreviewState(unsupported ? "unsupported" : "error");
+        setPreviewMessage(unsupported ? "This file is not a supported UTF-8 text file." : message);
+        return;
+      }
+      const preview = (await response.json()) as FilePreview;
+      setFilePreview(preview);
+      setPreviewState("ready");
+    } catch (reason) {
+      setPreviewState("error");
+      setPreviewMessage(reason instanceof Error ? reason.message : "Could not preview file");
+    }
   }
 
   function toggleFolder(path: string) {
@@ -378,7 +472,7 @@ export default function AgentConsole() {
         {contextStats?.compaction_count ? <div className="context-status">Memory compression active - {contextStats.compaction_count} compaction{contextStats.compaction_count === 1 ? "" : "s"}</div> : null}
         <div className="conversation-composer"><label className="field-label" htmlFor="task-upgraded">Message the agent</label><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) void runTask(); }} placeholder="Ask the agent to inspect, edit, and verify your workspace..." rows={3} disabled={!session || busy} /><div className="composer-actions"><span>Ctrl + Enter to run</span><div className="task-actions"><button className="button button-primary" onClick={runTask} disabled={!session || !task.trim() || busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{busy ? "Running" : "Run task"}</button><button className="button button-quiet" onClick={cancelRun} disabled={!busy}><CircleStop size={16} />Cancel</button></div></div>{error && <div className="error-banner"><XCircle size={15} />{error}</div>}</div>
       </section>
-      <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">Workspace file</div><h3>{filePreview?.path ?? "Preview"}</h3></div><FileCode2 size={17} /></div>{filePreview ? <pre className="file-content">{filePreview.content}</pre> : <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>
+      <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">Workspace file</div><h3>{filePreview?.path ?? selectedFilePath ?? "Preview"}</h3></div>{previewState === "unsupported" || previewState === "error" ? <FileWarning size={17} /> : <FileCode2 size={17} />}</div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>
     </main>
     <footer className="footer-bar"><span>Agent Core stays on the backend</span><span>FastAPI · SSE · local tools</span></footer>
   </div>;

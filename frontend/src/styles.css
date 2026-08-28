@@ -266,6 +266,27 @@ textarea:focus, .input-with-icon:focus-within { border-color: #59a98d; box-shado
 .preview-heading h3 { margin: 7px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
 .preview-heading > svg { color: #8a969f; }
 .file-content { min-height: 470px; max-height: calc(100vh - 200px); margin: 14px 0 0; overflow: auto; white-space: pre; font-size: 10px; line-height: 1.55; }
+.file-preview-content { margin-top: 14px; }
+.preview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; color: #84909a; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
+.preview-language { color: #176b56; font-weight: 700; }
+.code-frame { min-height: 470px; max-height: calc(100vh - 200px); overflow: auto; border: 1px solid #e2e8ee; background: #f8fafb; }
+.code-lines { min-width: max-content; margin: 0; padding: 8px 0; list-style: none; counter-reset: code-line; }
+.code-lines li { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 21px; padding-right: 14px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 10px; line-height: 21px; }
+.code-lines li:hover { background: #eef7f3; }
+.line-number { padding-right: 11px; color: #a8b1b7; text-align: right; user-select: none; }
+.code-lines code { color: #34444e; white-space: pre; }
+.syntax-comment { color: #8b979d; font-style: italic; }
+.syntax-string { color: #a15c38; }
+.syntax-number { color: #3e6f9f; }
+.syntax-keyword { color: #176b56; font-weight: 700; }
+.syntax-function { color: #765b9b; }
+.preview-state { min-height: 260px; margin-top: 14px; border: 1px dashed #d5dee4; background: #f8fafb; }
+.preview-state p { margin: 0; color: #52616b; font-size: 11px; font-weight: 700; }
+.preview-state span { color: #84909a; font-size: 10px; }
+.preview-unsupported { color: #9b7131; }
+.preview-unsupported h4, .preview-error h4 { margin: 0; color: #52616b; font-size: 12px; }
+.preview-unsupported p, .preview-error p { max-width: 210px; color: #71808c; font-weight: 400; line-height: 1.5; }
+.preview-error { color: #a13743; }
 .conversation-composer { margin-top: 24px; padding: 15px; border: 1px solid #d8e1e6; background: #ffffff; box-shadow: 0 7px 22px rgba(31, 47, 59, .05); }
 .conversation-composer textarea { min-height: 74px; resize: vertical; }
 .composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px; }
