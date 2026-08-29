@@ -498,7 +498,7 @@ Implemented scope:
 - Do not restore live Agent state, pending tool calls, or approval futures.
 - Provide a read-only past-run viewer in the UI.
 - Provide an explicit continue action for completed sessions.
-- Ignore malformed individual history files without hiding healthy runs.
+- Ignore malformed individual trace records without hiding healthy SQLite history.
 
 Avoid before deadline:
 

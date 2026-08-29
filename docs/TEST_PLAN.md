@@ -471,7 +471,7 @@ Assertions:
 
 Goal:
 
-- prove that a recorded JSONL run can be inspected after completion
+- prove that a recorded JSONL observability trace can be inspected after completion
 
 Required scenarios:
 

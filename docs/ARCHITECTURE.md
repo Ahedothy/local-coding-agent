@@ -222,8 +222,8 @@ Non-responsibilities:
 
 - no business logic
 - no control flow decisions
-- no restoration of live Agent state during replay; read-only run history may
-  be persisted separately as JSONL
+- no restoration of live Agent state during trace replay; JSONL is only the
+  optional append-only observability format, while Web history is stored in SQLite
 
 ## Agent Loop
 

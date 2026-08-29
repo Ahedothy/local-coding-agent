@@ -138,11 +138,10 @@ class RunRecord:
             if event.type.value == "user_message":
                 content = event.payload.get("content")
                 if isinstance(content, str):
-                    if self.history_store.begin_session_title(event.session_id):
-                        self.history_store.set_session_title_if_default(
-                            event.session_id,
-                            _title_from_first_message(content),
-                        )
+                    self.history_store.set_session_title_if_default(
+                        event.session_id,
+                        _title_from_first_message(content),
+                    )
             self.history_store.save_run_state(
                 self.run_id,
                 self.agent.session,
@@ -174,7 +173,6 @@ class ApiState:
         self.agent_factory = agent_factory
         self.history_store = history_store or SqliteRunStore(
             _default_history_database(),
-            legacy_jsonl_directory=Path.home() / ".lvyiyou-coding-agent" / "history",
             initialize=False,
         )
         self.sessions: dict[str, SessionRecord] = {}
@@ -236,11 +234,6 @@ class ApiState:
         session_id = events[0].session_id
         saved = self.history_store.load_run_state(run_id)
         if saved is None:
-            # Compatibility fallback for histories written before per-run
-            # snapshots were introduced. New runs always use the exact state
-            # captured for this run above.
-            saved = self.history_store.load_session(session_id)
-        if saved is None:
             raise ValueError("this run has no resumable session snapshot")
         existing = self.sessions.get(session_id)
         if existing is not None:
@@ -282,8 +275,6 @@ class ApiState:
             raise ValueError("session history is empty")
 
         saved = self.history_store.load_run_state(latest_run_id)
-        if saved is None:
-            saved = self.history_store.load_session(session_id)
         if saved is None:
             raise ValueError("this session has no resumable state")
         try:

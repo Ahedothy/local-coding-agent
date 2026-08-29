@@ -68,7 +68,6 @@ class HistorySummaryResponse(BaseModel):
     workspace_root: Path | None = None
     task: str | None = None
     title: str = "New conversation"
-    title_status: str = "pending"
     status: str
     started_at: str | None = None
     finished_at: str | None = None

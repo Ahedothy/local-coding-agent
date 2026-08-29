@@ -39,67 +39,6 @@ class JsonlEventLogger:
         self.write(event)
 
 
-class JsonlRunStore:
-    """Persist one append-only JSONL event stream per API run.
-
-    The store is deliberately read/write-only: loading a run only validates
-    recorded events and never restores an Agent or executes a tool.
-    """
-
-    def __init__(self, directory: str | Path) -> None:
-        self.directory = Path(directory).expanduser()
-
-    def _path_for(self, run_id: str) -> Path:
-        if not _RUN_ID_PATTERN.fullmatch(run_id):
-            raise ValueError("invalid run id")
-        return self.directory / f"{run_id}.jsonl"
-
-    def append(self, run_id: str, event: AgentEvent) -> bool:
-        """Append one event, returning False when persistence is unavailable."""
-        try:
-            path = self._path_for(run_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8", newline="\n") as stream:
-                stream.write(event.model_dump_json())
-                stream.write("\n")
-        except Exception:
-            # History must never turn a valid Agent step into a failed run.
-            return False
-        return True
-
-    def list_run_ids(self) -> list[str]:
-        """Return persisted run ids newest first, ignoring unrelated files."""
-        try:
-            paths = [
-                path
-                for path in self.directory.glob("*.jsonl")
-                if _RUN_ID_PATTERN.fullmatch(path.stem)
-            ]
-        except OSError:
-            return []
-        return [path.stem for path in sorted(paths, key=_modified_time, reverse=True)]
-
-    def read(self, run_id: str) -> list[AgentEvent]:
-        """Read and validate one persisted event stream."""
-        path = self._path_for(run_id)
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
-            raise ValueError(f"could not read run history {run_id}: {exc}") from exc
-
-        events: list[AgentEvent] = []
-        for line_number, line in enumerate(lines, start=1):
-            if not line.strip():
-                continue
-            try:
-                events.append(AgentEvent.model_validate_json(line))
-            except Exception as exc:
-                raise ValueError(
-                    f"invalid AgentEvent in run history {run_id} at line {line_number}: {exc}"
-                ) from exc
-        return events
-
-
 class SqliteRunStore:
     """Persist API runs, events, and resumable Agent session state locally.
 
@@ -112,17 +51,11 @@ class SqliteRunStore:
         self,
         path: str | Path,
         *,
-        legacy_jsonl_directory: str | Path | None = None,
         initialize: bool = True,
     ) -> None:
         self.path = Path(path).expanduser()
         self._lock = threading.Lock()
         self._initialized = False
-        self._legacy_jsonl_directory = (
-            Path(legacy_jsonl_directory).expanduser()
-            if legacy_jsonl_directory is not None
-            else None
-        )
         if initialize:
             self._ensure_initialized()
 
@@ -131,8 +64,6 @@ class SqliteRunStore:
             return
         self._initialize()
         self._initialized = True
-        if self._legacy_jsonl_directory is not None:
-            self._migrate_legacy_jsonl(self._legacy_jsonl_directory)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5.0)
@@ -167,7 +98,6 @@ class SqliteRunStore:
                         session_id TEXT PRIMARY KEY,
                         workspace_root TEXT NOT NULL,
                         title TEXT NOT NULL DEFAULT 'New conversation',
-                        title_status TEXT NOT NULL DEFAULT 'pending',
                         session_json TEXT NOT NULL,
                         context_json TEXT NOT NULL,
                         updated_at TEXT NOT NULL
@@ -193,10 +123,6 @@ class SqliteRunStore:
                 if "title" not in columns:
                     connection.execute(
                         "ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT 'New conversation'"
-                    )
-                if "title_status" not in columns:
-                    connection.execute(
-                        "ALTER TABLE sessions ADD COLUMN title_status TEXT NOT NULL DEFAULT 'pending'"
                     )
         except sqlite3.Error as exc:
             raise ValueError(f"could not initialize history database: {exc}") from exc
@@ -371,87 +297,15 @@ class SqliteRunStore:
                 cursor = connection.execute(
                     """
                     UPDATE sessions
-                    SET title = ?, title_status = 'ready'
-                    WHERE session_id = ?
-                      AND title_status IN ('pending', 'generating')
-                    """,
-                    (clean_title, session_id),
-                )
-                return cursor.rowcount > 0
-        except Exception:
-            return False
-
-    def begin_session_title(self, session_id: str) -> bool:
-        """Claim the one title-generation attempt for a session."""
-        try:
-            self._ensure_initialized()
-            with self._lock, self._connect() as connection:
-                cursor = connection.execute(
-                    """
-                    UPDATE sessions
-                    SET title_status = 'generating'
-                    WHERE session_id = ? AND title_status = 'pending'
-                    """,
-                    (session_id,),
-                )
-                return cursor.rowcount > 0
-        except Exception:
-            return False
-
-    def set_generated_session_title(self, session_id: str, title: str) -> bool:
-        """Store a generated title while this session is still unclaimed."""
-        clean_title = " ".join(title.split()).strip()
-        if not clean_title or clean_title == "New conversation":
-            return False
-        try:
-            self._ensure_initialized()
-            with self._lock, self._connect() as connection:
-                cursor = connection.execute(
-                    """
-                    UPDATE sessions
-                    SET title = ?, title_status = 'ready'
-                    WHERE session_id = ? AND title_status = 'generating'
-                    """,
-                    (clean_title, session_id),
-                )
-                return cursor.rowcount > 0
-        except Exception:
-            return False
-
-    def set_session_title_fallback(self, session_id: str, title: str) -> bool:
-        """Store a temporary local title while an async summary is pending."""
-        clean_title = " ".join(title.split()).strip()
-        if not clean_title:
-            return False
-        try:
-            self._ensure_initialized()
-            with self._lock, self._connect() as connection:
-                cursor = connection.execute(
-                    """
-                    UPDATE sessions
                     SET title = ?
-                    WHERE session_id = ? AND title_status = 'generating'
+                    WHERE session_id = ?
+                      AND title = 'New conversation'
                     """,
                     (clean_title, session_id),
                 )
                 return cursor.rowcount > 0
         except Exception:
             return False
-
-    def get_session_title_status(self, session_id: str) -> str | None:
-        """Return the title lifecycle state for a session."""
-        try:
-            self._ensure_initialized()
-            with self._lock, self._connect() as connection:
-                row = connection.execute(
-                    "SELECT title_status FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        return str(row["title_status"])
 
     def get_session_title(self, session_id: str) -> str | None:
         """Return the persisted display title for a session."""
@@ -468,26 +322,6 @@ class SqliteRunStore:
             return None
         value = row["title"]
         return str(value) if value else None
-
-    def load_session(self, session_id: str) -> dict[str, Any] | None:
-        try:
-            self._ensure_initialized()
-            with self._lock, self._connect() as connection:
-                row = connection.execute(
-                    "SELECT session_json, context_json FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-        except sqlite3.Error as exc:
-            raise ValueError(f"could not read saved session: {exc}") from exc
-        if row is None:
-            return None
-        try:
-            return {
-                "session": json.loads(row["session_json"]),
-                "context": json.loads(row["context_json"]),
-            }
-        except json.JSONDecodeError as exc:
-            raise ValueError("saved session state is invalid JSON") from exc
 
     def load_run_state(self, run_id: str) -> dict[str, Any] | None:
         """Load the snapshot captured at the end of a particular run."""
@@ -593,37 +427,6 @@ class SqliteRunStore:
                     f"invalid AgentEvent in session history {session_id} at sequence {sequence}: {exc}"
                 ) from exc
         return result
-
-    def _migrate_legacy_jsonl(self, directory: Path) -> None:
-        if not directory.exists() or not directory.is_dir():
-            return
-        for path in directory.glob("*.jsonl"):
-            if not _RUN_ID_PATTERN.fullmatch(path.stem):
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-                events = [
-                    AgentEvent.model_validate_json(line)
-                    for line in lines
-                    if line.strip()
-                ]
-                with self._lock, self._connect() as connection:
-                    existing = connection.execute(
-                        "SELECT 1 FROM runs WHERE run_id = ?", (path.stem,)
-                    ).fetchone()
-                    if existing is None:
-                        for event in events:
-                            self._append_locked(connection, path.stem, event)
-            except Exception:
-                continue
-
-
-def _modified_time(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

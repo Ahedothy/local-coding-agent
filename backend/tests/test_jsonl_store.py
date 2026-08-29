@@ -9,7 +9,6 @@ from coding_agent.events import (
     AgentEvent,
     AgentEventType,
     JsonlEventLogger,
-    JsonlRunStore,
     SqliteRunStore,
 )
 
@@ -79,59 +78,6 @@ def test_cli_event_log_is_optional_and_records_events(tmp_path: Path, capsys) ->
     assert json.loads(lines[0])["type"] == "session_started"
 
 
-def test_jsonl_run_store_persists_and_reads_one_run(tmp_path: Path) -> None:
-    store = JsonlRunStore(tmp_path / "history")
-    run_id = "12345678-1234-1234-1234-123456789abc"
-
-    assert store.append(run_id, make_event()) is True
-    assert store.append(run_id, make_event(AgentEventType.AGENT_FINISHED)) is True
-
-    assert store.list_run_ids() == [run_id]
-    events = store.read(run_id)
-    assert [event.type for event in events] == [
-        AgentEventType.SESSION_STARTED,
-        AgentEventType.AGENT_FINISHED,
-    ]
-
-
-def test_jsonl_run_store_rejects_path_like_run_ids(tmp_path: Path) -> None:
-    store = JsonlRunStore(tmp_path / "history")
-
-    assert store.append("..\\escape", make_event()) is False
-
-
-def test_sqlite_run_store_persists_events_and_session_context(tmp_path: Path) -> None:
-    store = SqliteRunStore(tmp_path / "history.db")
-    run_id = "12345678-1234-1234-1234-123456789abc"
-    session = Session(workspace_root=tmp_path)
-    context = ContextManager("System")
-    context.add_user_message("Remember this task")
-
-    assert store.append(
-        run_id,
-        AgentEvent(
-            type=AgentEventType.SESSION_STARTED,
-            session_id=session.session_id,
-            payload={"workspace_root": str(tmp_path)},
-        ),
-    ) is True
-    assert store.append(
-        run_id,
-        AgentEvent(
-            type=AgentEventType.USER_MESSAGE,
-            session_id=session.session_id,
-            payload={"content": "Remember this task"},
-        ),
-    ) is True
-    assert store.save_session(session, context) is True
-
-    events = store.read(run_id)
-    saved = store.load_session(session.session_id)
-    assert len(events) == 2
-    assert saved is not None
-    assert saved["context"]["messages"][1]["content"] == "Remember this task"
-
-
 def test_sqlite_run_store_keeps_a_snapshot_for_each_run(tmp_path: Path) -> None:
     store = SqliteRunStore(tmp_path / "history.db")
     session = Session(workspace_root=tmp_path)
@@ -176,6 +122,5 @@ def test_sqlite_session_title_is_set_once(tmp_path: Path) -> None:
     assert store.get_session_title(session.session_id) == "New conversation"
     assert store.set_session_title_if_default(session.session_id, "Fix the parser") is True
     assert store.get_session_title(session.session_id) == "Fix the parser"
-    assert store.get_session_title_status(session.session_id) == "ready"
     assert store.set_session_title_if_default(session.session_id, "A later task") is False
     assert store.get_session_title(session.session_id) == "Fix the parser"

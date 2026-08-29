@@ -44,7 +44,6 @@ type HistoryItem = {
   workspace_root?: string | null;
   task?: string | null;
   title?: string | null;
-  title_status?: "pending" | "generating" | "ready" | string;
   status: string;
   started_at?: string | null;
   finished_at?: string | null;
@@ -704,7 +703,6 @@ export default function AgentConsole() {
   const answerTimer = useRef<number | null>(null);
   const workspaceRequestsInFlight = useRef<Set<string>>(new Set());
   const historyRequestInFlight = useRef(false);
-  const titleRefreshTimers = useRef<Map<string, number>>(new Map());
   const selectedFilePathRef = useRef<string | null>(null);
   const previewRequestIdRef = useRef(0);
   const conversationRef = useRef<HTMLDivElement | null>(null);
@@ -712,8 +710,6 @@ export default function AgentConsole() {
   useEffect(() => () => {
     activeStreamRunId.current = null;
     eventSource.current?.close();
-    titleRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
-    titleRefreshTimers.current.clear();
   }, []);
 
   useEffect(() => {
@@ -808,8 +804,8 @@ export default function AgentConsole() {
     }
   }
 
-  async function loadHistory(showLoading = false): Promise<HistoryItem[] | null> {
-    if (historyRequestInFlight.current) return null;
+  async function loadHistory(showLoading = false) {
+    if (historyRequestInFlight.current) return;
     historyRequestInFlight.current = true;
     if (showLoading) setHistoryLoading(true);
     try {
@@ -823,33 +819,12 @@ export default function AgentConsole() {
         );
         return [...loaded, ...stillRunning].slice(0, 50);
       });
-      return loaded;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load run history");
-      return null;
     } finally {
       historyRequestInFlight.current = false;
       if (showLoading) setHistoryLoading(false);
     }
-  }
-
-  function refreshTitleUntilReady(sessionId: string, attempt = 0) {
-    if (attempt >= 8) {
-      titleRefreshTimers.current.delete(sessionId);
-      return;
-    }
-    const previous = titleRefreshTimers.current.get(sessionId);
-    if (previous !== undefined) window.clearTimeout(previous);
-    const delay = attempt === 0 ? 350 : Math.min(3000, 450 * 2 ** attempt);
-    const timer = window.setTimeout(async () => {
-      titleRefreshTimers.current.delete(sessionId);
-      const loaded = await loadHistory();
-      const item = loaded?.find((candidate) => candidate.session_id === sessionId);
-      if (item?.title_status === "pending" || item?.title_status === "generating") {
-        refreshTitleUntilReady(sessionId, attempt + 1);
-      }
-    }, delay);
-    titleRefreshTimers.current.set(sessionId, timer);
   }
 
   function subscribeToRun(started: RunResponse, initialEvents: AgentEvent[] = [], workspaceSessionId?: string) {
@@ -897,7 +872,6 @@ export default function AgentConsole() {
       }
       if (event.type === "user_message") {
         void loadHistory();
-        refreshTitleUntilReady(started.session_id);
       }
       if (isCurrentWorkspace && ["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
         void loadWorkspaceFiles(started.session_id).catch((reason) => {
@@ -915,7 +889,6 @@ export default function AgentConsole() {
         setApprovalBusy(false);
         setThinkingExpanded(false);
         void loadHistory();
-        refreshTitleUntilReady(started.session_id);
         source.close();
         if (activeStreamRunId.current === started.run_id) activeStreamRunId.current = null;
       }
@@ -1116,7 +1089,6 @@ export default function AgentConsole() {
           workspace_root: session.workspace_root,
           task: existing?.task ?? submittedTask,
           title: existing?.title ?? "New conversation",
-          title_status: existing?.title_status ?? "pending",
           status: "running",
           started_at: existing?.started_at ?? new Date().toISOString(),
           turn_count: (existing?.turn_count ?? 0) + 1,
@@ -1326,8 +1298,8 @@ export default function AgentConsole() {
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
         {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>Empty workspace</strong><small>This folder has no visible files or folders.</small></span></div>}
         </>}</div>
-         <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Conversations</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="Start a new conversation"><SquarePen size={14} /><span>New</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">Loading conversations...</p> : history.length === 0 ? <p className="history-empty">No conversations yet.</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `Local path: ${group.root}` : "Project path unavailable"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} {group.items.length === 1 ? "conversation" : "conversations"}</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`New conversation in ${group.name}`} aria-label={`New conversation in ${group.name}`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title_status === "pending" || item.title_status === "generating" ? "New conversation" : item.title ?? item.task ?? "New conversation"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} turns</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
-      </aside>}
+        <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Conversations</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="Start a new conversation"><SquarePen size={14} /><span>New</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">Loading conversations...</p> : history.length === 0 ? <p className="history-empty">No conversations yet.</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `Local path: ${group.root}` : "Project path unavailable"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} {group.items.length === 1 ? "conversation" : "conversations"}</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`New conversation in ${group.name}`} aria-label={`New conversation in ${group.name}`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "New conversation"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} turns</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
+        </aside>}
       <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"></div>
 
       <section className="trace-workbench" aria-label="Agent conversation">

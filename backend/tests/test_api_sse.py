@@ -403,13 +403,11 @@ def test_api_history_survives_new_app_and_replays_without_running_agent(tmp_path
     assert history.json()[0]["run_id"] == run_id
     assert history.json()[0]["task"] == "record this run"
     assert history.json()[0]["title"] == "record this run"
-    assert history.json()[0]["title_status"] == "ready"
     assert history.json()[0]["status"] == "completed"
     assert replay.status_code == 200
     assert replay.json()["summary"]["run_id"] == run_id
     assert replay.json()["summary"]["task"] == "record this run"
     assert replay.json()["summary"]["title"] == "record this run"
-    assert replay.json()["summary"]["title_status"] == "ready"
     assert replay.json()["events"][-1]["type"] == "agent_finished"
 
     provider_holder: dict[str, MockModelProvider] = {}

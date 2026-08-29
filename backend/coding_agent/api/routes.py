@@ -83,20 +83,17 @@ def _history_summary(
     *,
     turn_count: int | None = None,
     title: str | None = None,
-    title_status: str | None = None,
 ) -> HistorySummaryResponse:
     summary = summarize_events(events)
     started_at = events[0].timestamp.isoformat() if events else None
     finished_at = events[-1].timestamp.isoformat() if events else None
     resolved_title = title or (summary.tasks[0] if summary.tasks else "New conversation")
-    resolved_title_status = title_status or ("ready" if summary.tasks else "pending")
     return HistorySummaryResponse(
         run_id=run_id,
         session_id=summary.session_id or "unknown",
         workspace_root=summary.workspace_root,
         task=summary.tasks[-1] if summary.tasks else None,
         title=resolved_title,
-        title_status=resolved_title_status,
         status=summary.status or "running",
         started_at=started_at,
         finished_at=finished_at if summary.status else None,
@@ -195,7 +192,6 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
                     session_events,
                     turn_count=sum(event.type.value == "user_message" for event in session_events),
                     title=state.history_store.get_session_title(session_events[0].session_id),
-                    title_status=state.history_store.get_session_title_status(session_events[0].session_id),
                 )
             )
         return history[:bounded_limit]
@@ -212,7 +208,6 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
                 events,
                 turn_count=sum(event.type.value == "user_message" for event in events),
                 title=state.history_store.get_session_title(session_id),
-                title_status=state.history_store.get_session_title_status(session_id),
             ),
             events=events,
         )
@@ -231,7 +226,6 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
                 run_id,
                 events,
                 title=state.history_store.get_session_title(events[0].session_id),
-                title_status=state.history_store.get_session_title_status(events[0].session_id),
             ),
             events=events,
         )
