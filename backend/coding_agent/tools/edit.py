@@ -35,6 +35,13 @@ class ApplyPatchArguments(BaseModel):
             "headers, and @@ hunk headers."
         ),
     )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "When true, parse and validate the patch and return the generated "
+            "diff without writing files. Use this to diagnose uncertain patches."
+        ),
+    )
 
 
 def _is_binary(path: Path) -> bool:
@@ -452,6 +459,9 @@ class ApplyPatchTool(Tool):
         "a unique exact context when a line number drifts, but it never ignores "
         "or fuzzes source text. Redundant hunk line counts are normalized from "
         "the body before context validation. "
+        "Set dry_run=true to validate a patch and inspect the generated diff "
+        "without writing files; if dry_run succeeds, resend the same patch with "
+        "dry_run=false to apply it. "
         "Validate all hunks before writing and roll back if any file write "
         "fails. Use replace_in_file only for one small simple exact replacement."
     )
@@ -555,6 +565,24 @@ class ApplyPatchTool(Tool):
         }
         unified_diff = _build_unified_diff(plans)
 
+        if arguments.dry_run:
+            return ToolResult(
+                tool_call_id="pending",
+                tool_name=self.name,
+                success=True,
+                output={
+                    "dry_run": True,
+                    "would_write": False,
+                    "touched_files": touched_files,
+                    "applied_hunks": applied_hunks,
+                    "normalized_hunks": normalized_hunks,
+                    "rejected_hunks": rejected_hunks,
+                    "diff_summary": diff_summary,
+                    "diff": unified_diff,
+                    "rolled_back": False,
+                },
+            )
+
         written: list[_PatchPlan] = []
         try:
             for plan in plans:
@@ -577,6 +605,8 @@ class ApplyPatchTool(Tool):
                 success=False,
                 error=error,
                 output={
+                    "dry_run": False,
+                    "would_write": True,
                     "touched_files": [],
                     "applied_hunks": [],
                     "normalized_hunks": normalized_hunks,
@@ -592,6 +622,8 @@ class ApplyPatchTool(Tool):
             tool_name=self.name,
             success=True,
             output={
+                "dry_run": False,
+                "would_write": True,
                 "touched_files": touched_files,
                 "applied_hunks": applied_hunks,
                 "normalized_hunks": normalized_hunks,
@@ -613,6 +645,8 @@ class ApplyPatchTool(Tool):
             success=False,
             error=error,
             output={
+                "dry_run": False,
+                "would_write": False,
                 "touched_files": [],
                 "applied_hunks": [],
                 "normalized_hunks": [],

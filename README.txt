@@ -210,14 +210,21 @@ explicitly from Recent tasks.
 Local Inspection Tools
 ----------------------
 
-The Agent also has three bounded, read-only inspection tools:
+The Agent also has four bounded, read-only inspection tools:
 
-- `get_file_info` reports file or directory metadata, text/binary status, and
-  line count when the file is within the inspection limit.
+- `get_file_info` reports file or directory metadata, detected file type and
+  MIME type, text/binary status, best-effort encoding and confidence, and line
+  count when the file is within the inspection limit. It recognizes BOMs,
+  common legacy text encodings, and common binary file signatures while making
+  heuristic results explicit.
 - `list_directory_tree` shows a compact directory-first tree with depth,
   entry, and generated-directory ignore rules.
 - `git_diff` shows local Git status and a bounded unified diff without exposing
   `.git` metadata or mutating the repository.
+- `inspect_environment` reports local platform details, fixed runtime/compiler/
+  package-manager probes, project marker files, redacted configuration presence,
+  and candidate localhost port availability. It does not accept arbitrary
+  commands or modify the workspace.
 
 These tools operate on the selected local Workspace. Every path is checked by
 the same Workspace security boundary used by the editing and command tools.
@@ -225,6 +232,17 @@ The existing `execute_command` remains the path for running tests, so test
 commands keep one consistent timeout, cwd, shell, and exit-status policy.
 Formatter-specific execution, package installation, network browsing, and Git
 mutation are intentionally outside the current tool set.
+
+Local Process Management
+------------------------
+
+For a development server or interactive local program that must remain alive
+across multiple Agent calls, use `manage_process`. It supports `start`, `list`,
+`status`, `read`, `write`, and `stop`. The start command is still an argument
+array, not a shell string; output is drained locally into bounded buffers, and
+the returned process handle is used for later operations. Starting, writing,
+and stopping require local approval. The tool does not install packages, create
+detached system services, or restore processes after the Agent session ends.
 
 Demo Repository
 ---------------

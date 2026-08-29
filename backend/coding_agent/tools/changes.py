@@ -119,6 +119,8 @@ class ChangeStore:
         if tool_name not in {"write_file", "replace_in_file", "apply_patch"}:
             return None
         argument_data = arguments.model_dump(mode="python")
+        if tool_name == "apply_patch" and argument_data.get("dry_run") is True:
+            return None
         snapshots: list[FileSnapshot] = []
         for relative_path in _edit_paths(tool_name, argument_data):
             path = context.workspace.resolve_path(relative_path)

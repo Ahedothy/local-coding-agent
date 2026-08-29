@@ -9,6 +9,7 @@ import pytest
 
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
+from coding_agent.tools import inspection as inspection_tools
 from coding_agent.tools.inspection import INSPECTION_TOOLS
 from coding_agent.workspace import Workspace
 
@@ -46,6 +47,11 @@ def test_get_file_info_reports_text_metadata(tmp_path: Path) -> None:
     assert result.output["size_bytes"] == len("one\ntwo\n".encode("utf-8"))
     assert result.output["is_binary"] is False
     assert result.output["encoding"] == "utf-8"
+    assert result.output["encoding_confidence"] == "high"
+    assert result.output["encoding_detection"] == "utf8"
+    assert result.output["file_type"] == "Python source"
+    assert result.output["mime_type"] == "text/x-python"
+    assert result.output["type_detection"] == "extension"
     assert result.output["line_count"] == 2
     assert result.output["line_count_truncated"] is False
     assert result.output["modified_at"].endswith("+00:00")
@@ -76,8 +82,68 @@ def test_get_file_info_handles_binary_and_directories(tmp_path: Path) -> None:
     assert binary.success is True
     assert binary.output["is_binary"] is True
     assert binary.output["encoding"] is None
+    assert binary.output["type_category"] == "binary data"
+    assert binary.output["mime_type"] == "application/octet-stream"
     assert directory.output["kind"] == "directory"
+    assert directory.output["type_category"] == "directory"
+    assert directory.output["file_type"] == "Directory"
     assert directory.output["line_count"] is None
+
+
+def test_get_file_info_detects_bom_encoding_and_line_count(tmp_path: Path) -> None:
+    path = tmp_path / "message.txt"
+    path.write_bytes("第一行\n第二行".encode("utf-16"))
+
+    result = execute(tmp_path, "get_file_info", {"path": "message.txt"})
+
+    assert result.success is True
+    assert result.output["is_binary"] is False
+    assert result.output["encoding"] == "utf-16-le"
+    assert result.output["encoding_confidence"] == "high"
+    assert result.output["encoding_detection"] == "bom"
+    assert result.output["line_count"] == 2
+
+
+def test_get_file_info_detects_common_legacy_text_encoding(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.txt"
+    path.write_bytes("你好，世界\n".encode("gb18030"))
+
+    result = execute(tmp_path, "get_file_info", {"path": "legacy.txt"})
+
+    assert result.success is True
+    assert result.output["is_binary"] is False
+    assert result.output["encoding"] == "gb18030"
+    assert result.output["encoding_confidence"] == "medium"
+    assert result.output["encoding_detection"] == "decode_heuristic"
+
+
+def test_get_file_info_uses_magic_bytes_for_binary_type(tmp_path: Path) -> None:
+    path = tmp_path / "image.bin"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"plain-looking payload")
+
+    result = execute(tmp_path, "get_file_info", {"path": "image.bin"})
+
+    assert result.success is True
+    assert result.output["is_binary"] is True
+    assert result.output["file_type"] == "PNG image"
+    assert result.output["mime_type"] == "image/png"
+    assert result.output["type_detection"] == "magic"
+    assert result.output["encoding"] is None
+
+
+def test_get_file_info_marks_large_file_scan_as_truncated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(inspection_tools, "MAX_INFO_SCAN_BYTES", 4)
+    path = tmp_path / "large.txt"
+    path.write_bytes(b"one\ntwo\nthree\n")
+
+    result = execute(tmp_path, "get_file_info", {"path": "large.txt"})
+
+    assert result.success is True
+    assert result.output["scan_truncated"] is True
+    assert result.output["line_count_truncated"] is True
 
 
 def test_list_directory_tree_is_compact_and_skips_ignored_directories(

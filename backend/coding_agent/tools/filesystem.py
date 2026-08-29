@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -16,6 +17,7 @@ MAX_WRITE_CHARS = 1024 * 1024
 DEFAULT_MAX_CHARS = 20_000
 DEFAULT_MAX_ENTRIES = 100
 DEFAULT_MAX_MATCHES = 50
+MAX_SEARCH_LINE_CHARS = 500
 
 IGNORED_DIRECTORY_NAMES = frozenset(
     {
@@ -68,6 +70,20 @@ class SearchFilesArguments(BaseModel):
     path: str = "."
     glob: str | None = None
     max_matches: int = Field(default=DEFAULT_MAX_MATCHES, gt=0, le=1_000)
+    use_regex: bool = Field(
+        default=False,
+        description="Treat query as a Python regular expression when true.",
+    )
+    case_sensitive: bool = Field(
+        default=True,
+        description="Use case-sensitive matching when true.",
+    )
+    context_lines: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description="Number of lines before and after each match to include.",
+    )
 
 
 def _relative_path(workspace_root: Path, path: Path) -> str:
@@ -87,6 +103,74 @@ def _read_text_limited(path: Path, max_bytes: int) -> tuple[str, bool]:
     if truncated:
         data = data[:max_bytes]
     return data.decode("utf-8"), truncated
+
+
+def _line_match(
+    line: str,
+    query: str,
+    *,
+    use_regex: bool,
+    case_sensitive: bool,
+    pattern: re.Pattern[str] | None,
+) -> tuple[int, int] | None:
+    if use_regex:
+        if pattern is None:
+            return None
+        match = pattern.search(line)
+        if match is None:
+            return None
+        return match.start(), match.end()
+
+    haystack = line if case_sensitive else line.casefold()
+    needle = query if case_sensitive else query.casefold()
+    start = haystack.find(needle)
+    if start < 0:
+        return None
+    return start, start + len(query)
+
+
+def _context_window(
+    lines: list[str],
+    start: int,
+    end: int,
+) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    for index in range(max(0, start), min(len(lines), end)):
+        excerpt, _, _, truncated = _line_excerpt(lines[index], None)
+        context.append(
+            {
+                "line_number": index + 1,
+                "line": excerpt,
+                "line_truncated": truncated,
+            }
+        )
+    return context
+
+
+def _line_excerpt(
+    line: str,
+    span: tuple[int, int] | None,
+) -> tuple[str, int | None, int | None, bool]:
+    if len(line) <= MAX_SEARCH_LINE_CHARS:
+        if span is None:
+            return line, None, None, False
+        return line, span[0], span[1], False
+
+    if span is None:
+        return f"{line[:MAX_SEARCH_LINE_CHARS]}...", None, None, True
+
+    match_start, match_end = span
+    half_window = max(1, (MAX_SEARCH_LINE_CHARS - 6) // 2)
+    start = max(0, match_start - half_window)
+    end = min(len(line), match_end + half_window)
+    if end - start > MAX_SEARCH_LINE_CHARS:
+        end = start + MAX_SEARCH_LINE_CHARS
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(line) else ""
+    excerpt = f"{prefix}{line[start:end]}{suffix}"
+    adjusted_start = match_start - start + len(prefix)
+    adjusted_end = match_end - start + len(prefix)
+    return excerpt, adjusted_start, adjusted_end, True
 
 
 def _tool_success(tool: Tool, output: object) -> ToolResult:
@@ -208,7 +292,11 @@ class WriteFileTool(Tool):
 
 class SearchFilesTool(Tool):
     name: ClassVar[str] = "search_files"
-    description: ClassVar[str] = "Search UTF-8 text files inside the workspace."
+    description: ClassVar[str] = (
+        "Search UTF-8 text files inside the workspace. Supports literal or "
+        "regular-expression matching, optional case-insensitive search, glob "
+        "scoping, and small before/after context windows."
+    )
     parameters_model: ClassVar[type[BaseModel]] = SearchFilesArguments
 
     async def execute(
@@ -220,7 +308,16 @@ class SearchFilesTool(Tool):
         if not scope.is_dir():
             raise ValueError(f"search path is not a directory: {arguments.path}")
 
+        pattern: re.Pattern[str] | None = None
+        if arguments.use_regex:
+            flags = 0 if arguments.case_sensitive else re.IGNORECASE
+            try:
+                pattern = re.compile(arguments.query, flags)
+            except re.error as exc:
+                raise ValueError(f"invalid regular expression: {exc}") from exc
+
         matches: list[str] = []
+        structured_matches: list[dict[str, Any]] = []
         pending = [scope]
         while pending and len(matches) < arguments.max_matches:
             current = pending.pop(0)
@@ -243,13 +340,46 @@ class SearchFilesTool(Tool):
                     text, _ = _read_text_limited(resolved, MAX_SEARCH_FILE_BYTES)
                 except UnicodeDecodeError:
                     continue
-                for line_number, line in enumerate(text.splitlines(), start=1):
-                    if arguments.query in line:
-                        matches.append(
-                            f"{_relative_path(context.workspace.root, resolved)}:{line_number}: {line}"
-                        )
-                        if len(matches) >= arguments.max_matches:
-                            break
+                lines = text.splitlines()
+                relative = _relative_path(context.workspace.root, resolved)
+                for index, line in enumerate(lines):
+                    span = _line_match(
+                        line,
+                        arguments.query,
+                        use_regex=arguments.use_regex,
+                        case_sensitive=arguments.case_sensitive,
+                        pattern=pattern,
+                    )
+                    if span is None:
+                        continue
+                    line_number = index + 1
+                    excerpt, match_start, match_end, line_truncated = _line_excerpt(
+                        line,
+                        span,
+                    )
+                    matches.append(f"{relative}:{line_number}: {excerpt}")
+                    structured_matches.append(
+                        {
+                            "path": relative,
+                            "line_number": line_number,
+                            "line": excerpt,
+                            "match_start": match_start,
+                            "match_end": match_end,
+                            "line_truncated": line_truncated,
+                            "before_context": _context_window(
+                                lines,
+                                index - arguments.context_lines,
+                                index,
+                            ),
+                            "after_context": _context_window(
+                                lines,
+                                index + 1,
+                                index + 1 + arguments.context_lines,
+                            ),
+                        }
+                    )
+                    if len(matches) >= arguments.max_matches:
+                        break
                 if len(matches) >= arguments.max_matches:
                     break
 
@@ -257,7 +387,14 @@ class SearchFilesTool(Tool):
             self,
             {
                 "query": arguments.query,
+                "path": _relative_path(context.workspace.root, scope),
+                "glob": arguments.glob,
+                "use_regex": arguments.use_regex,
+                "case_sensitive": arguments.case_sensitive,
+                "context_lines": arguments.context_lines,
                 "matches": matches,
+                "structured_matches": structured_matches,
+                "match_count": len(matches),
                 "truncated": bool(pending) or len(matches) >= arguments.max_matches,
             },
         )

@@ -16,6 +16,7 @@ from .base import ToolContext
 APPROVAL_REQUIRED_TOOLS = frozenset(
     {
         "execute_command",
+        "manage_process",
         "write_file",
         "replace_in_file",
         "apply_patch",
@@ -29,7 +30,17 @@ def _preview(value: object, max_chars: int = 12_000) -> str:
 
 
 def _approval_kind(tool_name: str) -> str:
+    if tool_name == "manage_process":
+        return "process"
     return "command" if tool_name == "execute_command" else "edit"
+
+
+def requires_approval_for(tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
+    if tool_name == "apply_patch" and arguments and arguments.get("dry_run") is True:
+        return False
+    if tool_name == "manage_process":
+        return bool(arguments and arguments.get("operation") in {"start", "write", "stop"})
+    return tool_name in APPROVAL_REQUIRED_TOOLS
 
 
 def _approval_details(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -39,6 +50,19 @@ def _approval_details(tool_name: str, arguments: dict[str, Any]) -> dict[str, An
             "cwd": arguments.get("cwd", "."),
             "timeout_seconds": arguments.get("timeout_seconds", 30.0),
         }
+    if tool_name == "manage_process":
+        details = {
+            "operation": arguments.get("operation"),
+            "process_id": arguments.get("process_id"),
+            "cwd": arguments.get("cwd", "."),
+            "grace_seconds": arguments.get("grace_seconds", 2.0),
+            "force": arguments.get("force", False),
+        }
+        if arguments.get("command") is not None:
+            details["command"] = arguments.get("command")
+        if arguments.get("input") is not None:
+            details["input_preview"] = _preview(arguments.get("input", ""), 4_000)
+        return details
     if tool_name == "apply_patch":
         return {"patch": _preview(arguments.get("patch", ""))}
     if tool_name == "replace_in_file":
@@ -101,6 +125,10 @@ class ApprovalGate:
     def requires_approval(tool_name: str) -> bool:
         return tool_name in APPROVAL_REQUIRED_TOOLS
 
+    @staticmethod
+    def requires_approval_for(tool_name: str, arguments: dict[str, Any]) -> bool:
+        return requires_approval_for(tool_name, arguments)
+
     def create(
         self,
         tool_call: ToolCall,
@@ -117,6 +145,8 @@ class ApprovalGate:
             summary=(
                 "Run a local command"
                 if tool_call.name == "execute_command"
+                else "Manage a local process"
+                if tool_call.name == "manage_process"
                 else "Apply local file changes"
             ),
             details=_approval_details(tool_call.name, argument_data),

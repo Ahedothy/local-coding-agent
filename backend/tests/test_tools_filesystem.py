@@ -167,4 +167,128 @@ def test_search_files_finds_text_and_respects_match_limit(tmp_path: Path) -> Non
     assert result.success is True
     assert len(result.output["matches"]) == 1
     assert result.output["matches"][0].endswith(":1: needle")
+    assert result.output["structured_matches"][0]["path"] == "one.py"
+    assert result.output["match_count"] == 1
     assert result.output["truncated"] is True
+
+
+def test_search_files_supports_regex_case_and_context(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text(
+        "before\n"
+        "Value = 123\n"
+        "after\n"
+        "value = abc\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "notes.txt").write_text("Value = 456\n", encoding="utf-8")
+
+    result = asyncio.run(
+        filesystem_executor().execute(
+            ToolCall(
+                id="call-1",
+                name="search_files",
+                arguments={
+                    "path": "src",
+                    "glob": "*.py",
+                    "query": r"value\s*=\s*\d+",
+                    "use_regex": True,
+                    "case_sensitive": False,
+                    "context_lines": 1,
+                },
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is True
+    assert result.output["path"] == "src"
+    assert result.output["glob"] == "*.py"
+    assert result.output["use_regex"] is True
+    assert result.output["case_sensitive"] is False
+    assert result.output["matches"] == ["src/main.py:2: Value = 123"]
+    assert result.output["structured_matches"] == [
+        {
+            "path": "src/main.py",
+            "line_number": 2,
+            "line": "Value = 123",
+            "match_start": 0,
+            "match_end": 11,
+            "line_truncated": False,
+            "before_context": [
+                {"line_number": 1, "line": "before", "line_truncated": False}
+            ],
+            "after_context": [
+                {"line_number": 3, "line": "after", "line_truncated": False}
+            ],
+        }
+    ]
+
+
+def test_search_files_can_match_literal_case_insensitively(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("Needle\nneedle\n", encoding="utf-8")
+
+    result = asyncio.run(
+        filesystem_executor().execute(
+            ToolCall(
+                id="call-1",
+                name="search_files",
+                arguments={
+                    "query": "needle",
+                    "case_sensitive": False,
+                    "max_matches": 10,
+                },
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is True
+    assert result.output["matches"] == [
+        "main.py:1: Needle",
+        "main.py:2: needle",
+    ]
+
+
+def test_search_files_rejects_invalid_regex(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("value = 1\n", encoding="utf-8")
+
+    result = asyncio.run(
+        filesystem_executor().execute(
+            ToolCall(
+                id="call-1",
+                name="search_files",
+                arguments={"query": "(", "use_regex": True},
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is False
+    assert "invalid regular expression" in result.error
+
+
+def test_search_files_truncates_long_matching_lines_around_the_match(
+    tmp_path: Path,
+) -> None:
+    long_line = "a" * 700 + "needle" + "b" * 700
+    (tmp_path / "main.py").write_text(f"{long_line}\n", encoding="utf-8")
+
+    result = asyncio.run(
+        filesystem_executor().execute(
+            ToolCall(
+                id="call-1",
+                name="search_files",
+                arguments={"query": "needle"},
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    match = result.output["structured_matches"][0]
+    assert result.success is True
+    assert match["line_truncated"] is True
+    assert len(match["line"]) <= 506
+    assert "needle" in match["line"]
+    assert match["match_start"] is not None
+    assert match["line"][match["match_start"] : match["match_end"]] == "needle"

@@ -66,7 +66,11 @@ class ToolExecutor:
                 emit_started=False,
             )
 
-        if self.approval_gate is not None and self.approval_gate.requires_approval(tool_call.name):
+        argument_data = arguments.model_dump(mode="json")
+        if (
+            self.approval_gate is not None
+            and self.approval_gate.requires_approval_for(tool_call.name, argument_data)
+        ):
             approval = self.approval_gate.create(tool_call, context, arguments)
             approval_scope = self.approval_gate.auto_approval_scope(context.turn_id)
             automatically_approved = approval_scope is not None

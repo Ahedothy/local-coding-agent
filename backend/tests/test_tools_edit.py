@@ -181,6 +181,29 @@ diff --git a/config.py b/config.py
     assert result.output["rolled_back"] is False
 
 
+def test_apply_patch_dry_run_validates_and_returns_diff_without_writing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    patch = """--- a/main.py
++++ b/main.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+"""
+
+    result = execute_patch(tmp_path, {"patch": patch, "dry_run": True})
+
+    assert result.success is True
+    assert result.output["dry_run"] is True
+    assert result.output["would_write"] is False
+    assert result.output["diff_summary"]["lines_added"] == 1
+    assert result.output["diff_summary"]["lines_removed"] == 1
+    assert "-value = 1\n+value = 2" in result.output["diff"]
+    assert path.read_text(encoding="utf-8") == "value = 1\n"
+
+
 def test_apply_patch_applies_multiple_standard_hunks_to_one_file(tmp_path: Path) -> None:
     path = tmp_path / "main.py"
     path.write_text("value = 1\nstatus = 'old'\n", encoding="utf-8")

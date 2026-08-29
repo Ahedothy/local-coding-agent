@@ -307,6 +307,7 @@ Core tools:
 - `read_file`
 - `write_file`
 - `search_files`
+- `manage_process`
 - `execute_command`
 - `replace_in_file`
 - `apply_patch`
@@ -317,11 +318,19 @@ Read-only inspection tools:
 - `list_directory_tree`
 - `git_diff`
 
+Environment detection:
+
+- `inspect_environment`
+
 The inspection tools are intentionally read-only. They give the model compact
 metadata, structure, and change awareness without adding Git mutation,
 package installation, network browsing, or formatter-specific execution.
 `execute_command` remains the single local command path, including for test
 commands, so command safety and result semantics do not diverge across tools.
+`search_files` is a local UTF-8 code-search tool. It supports literal matching
+by default plus opt-in regular expressions, case-insensitive matching, glob
+filtering, scoped traversal, bounded match counts, small context windows, and
+line excerpts that prevent a single long line from bloating model context.
 
 Each tool has:
 
@@ -339,8 +348,9 @@ The model sees JSON schema generated from the same Pydantic model used for local
 Inspection tools follow the same `Tool` and `ToolExecutor` contract as file
 editing and command tools:
 
-- `get_file_info` scans at most a bounded number of bytes when calculating text
-  line information and reports whether the scan was truncated
+- `get_file_info` scans at most a bounded number of bytes and reports file
+  category/type, MIME type, binary status, best-effort encoding, confidence,
+  detection method, and whether line scanning was truncated
 - `list_directory_tree` applies deterministic ignore rules, skips symlinks,
   and caps both traversal depth and returned entries
 - `git_diff` executes only read-only `git diff` and `git status` subprocesses
@@ -350,6 +360,50 @@ editing and command tools:
 Every requested path still goes through `Workspace`, and failures are returned
 as structured `ToolResult` values by the generic executor. The model receives
 the same Pydantic-generated schemas that local validation uses.
+
+### Environment Detection Contract
+
+`inspect_environment` is a read-only local capability for deciding how to work
+in an unfamiliar project. It reports platform information, fixed probes for
+common runtimes, compilers, build tools, and package managers, project marker
+files in a selected workspace directory, whether a small allowlist of safe
+configuration variables is present, and whether requested localhost ports can
+be bound.
+
+The tool never accepts an arbitrary command, never installs packages, never
+returns environment variable values, and never modifies the workspace. Version
+probes use `shell=False`, bounded timeouts, and a fixed argument list. Port
+checks only bind to `127.0.0.1` and are treated as a point-in-time availability
+hint rather than a reservation. Probe failures are represented per item so a
+missing compiler does not make the whole environment inspection unusable.
+
+`get_file_info` uses only Python standard-library detection. It gives BOM-based
+results high confidence, recognizes common binary magic bytes and extensions,
+and tries a small set of common text encodings such as UTF-8 and GB18030 when
+there is no BOM. Legacy-encoding results are explicitly marked heuristic; the
+tool never silently rewrites a file or claims universal charset detection.
+
+### Local Process Management Contract
+
+`manage_process` provides a small lifecycle protocol for local development
+servers and interactive command-line programs that cannot be handled by a
+single blocking `execute_command` call. The supported operations are
+`start`, `list`, `status`, `read`, `write`, and `stop`.
+
+`start` accepts only an argument array and validates its working directory
+through `Workspace`. It launches with `shell=False`, captures stdout and stderr
+through background readers, and returns an opaque process handle. `read` and
+`status` return bounded output tails; `write` sends explicit UTF-8 text to the
+child stdin; `stop` requests termination and escalates to kill after a bounded
+grace period. Side-effecting operations require the existing approval gate,
+while inspection operations remain read-only. The process table is kept by the
+tool instance for the lifetime of the Agent session, and finished records are
+bounded so a long conversation cannot grow memory without limit.
+
+The tool does not provide arbitrary shell parsing, package installation,
+detached system services, process tree ownership, or cross-session process
+restoration. This keeps the feature useful for local coding workflows while
+remaining explicit and explainable under the assignment constraints.
 
 ### ToolContext
 
@@ -490,7 +544,10 @@ an old tool call or approval.
 `apply_patch` accepts standard unified diff text for related multi-line or
 multi-file edits. Parsing, context validation, Workspace checks, atomic writes,
 rollback, and diff reporting are implemented locally in the tool layer; no
-shell patch command or agent framework is involved.
+shell patch command or agent framework is involved. `apply_patch` also supports
+`dry_run=true`, which performs the same local validation and returns the
+generated standard diff without writing files, requesting edit approval, or
+creating an undo record.
 
 ## Final MVP Statement
 

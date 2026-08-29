@@ -320,6 +320,10 @@ function activityDetails(step: ActivityStep) {
   if (event.iteration !== null) details.push(["Iteration", String(event.iteration)]);
   if (typeof output?.path === "string") details.push(["Path", output.path]);
   if (typeof output?.command === "string") details.push(["Command", output.command]);
+  if (typeof output?.process_id === "string") details.push(["Process", output.process_id]);
+  if (typeof output?.status === "string") details.push(["Process status", output.status]);
+  if (typeof output?.pid === "number") details.push(["PID", String(output.pid)]);
+  if (typeof output?.operation === "string" && output.operation !== "status") details.push(["Operation", output.operation]);
   if (Array.isArray(output?.touched_files)) details.push(["Files updated", String(output.touched_files.length)]);
   if (typeof output?.duration_seconds === "number") details.push(["Duration", `${output.duration_seconds.toFixed(2)}s`]);
   if (typeof event.payload.tool_call_count === "number") details.push(["Tool calls", String(event.payload.tool_call_count)]);
@@ -464,12 +468,23 @@ function highlightCodeLine(line: string, language: string): ReactNode[] {
   return tokens.length ? tokens : [line];
 }
 
+function renderHighlightedCodeLines(lines: string[], language: string, keyPrefix: string): ReactNode[] {
+  const highlightLanguage = /^(text|txt|plaintext|md|markdown)?$/i.test(language) ? "Plain text" : language;
+  return lines.map((line, index) => <span className="code-preview-line" key={`${keyPrefix}-${index}`}>{highlightCodeLine(line, highlightLanguage)}</span>);
+}
+
 function CodePreview({ preview }: { preview: FilePreview }): ReactElement {
   const language = previewLanguage(preview.path);
   const lines = preview.content.split(/\r?\n/);
+  if (language === "Markdown") {
+    return <div className="file-preview-content file-preview-markdown">
+      <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} lines{preview.truncated ? " · truncated" : ""}</span></div>
+      <div className="markdown-preview-frame"><MarkdownAnswer content={preview.content} /></div>
+    </div>;
+  }
   return <div className="file-preview-content">
     <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} lines{preview.truncated ? " · truncated" : ""}</span></div>
-    <div className="code-frame"><ol className="code-lines">{lines.map((line, index) => <li key={index}><span className="line-number">{index + 1}</span><code>{highlightCodeLine(line, language)}</code></li>)}</ol></div>
+    <div className="markdown-preview-frame file-preview-code-frame"><pre className="markdown-code-block"><code>{renderHighlightedCodeLines(lines, language, "file-preview")}</code></pre></div>
   </div>;
 }
 
@@ -575,7 +590,7 @@ function MarkdownAnswer({ content }: { content: string }): ReactElement {
       if (index < lines.length) index += 1;
       blocks.push(language.toLowerCase() === "diff" || language.toLowerCase() === "patch"
         ? <UnifiedDiff diff={codeLines.join("\n")} key={"diff-" + blockIndex++} />
-        : <pre className="markdown-code-block" key={"code-" + blockIndex++}><code className={language ? "language-" + language : undefined}>{codeLines.join("\n")}</code></pre>);
+        : <pre className="markdown-code-block" key={"code-" + blockIndex++}><code className={language ? "language-" + language : undefined}>{renderHighlightedCodeLines(codeLines, language, `markdown-code-${blockIndex}`)}</code></pre>);
       continue;
     }
 
@@ -692,7 +707,7 @@ export default function AgentConsole() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(270);
-  const [rightWidth, setRightWidth] = useState(310);
+  const [rightWidth, setRightWidth] = useState(360);
   const eventSource = useRef<EventSource | null>(null);
   const activeStreamRunId = useRef<string | null>(null);
   const activeSessionId = useRef<string | null>(null);
@@ -1259,7 +1274,7 @@ export default function AgentConsole() {
     const onMove = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - startX;
       if (side === "left") setLeftWidth(Math.min(420, Math.max(220, startWidth + delta)));
-      else setRightWidth(Math.min(420, Math.max(220, startWidth - delta)));
+      else setRightWidth(Math.min(560, Math.max(280, startWidth - delta)));
     };
     const stop = () => {
       window.removeEventListener("pointermove", onMove);

@@ -184,6 +184,14 @@ The Web UI provides both one-turn auto-approval from an approval card and a
 session-level auto-approval switch beside the composer. The session switch is
 sent with each new run, while the runtime still records approval events for
 automatically approved operations and resets one-turn approval after completion.
+The editing reliability pass adds an explicit `dry_run` mode to `apply_patch`.
+With `dry_run=true`, the tool performs the same parsing, Workspace validation,
+binary checks, hunk normalization, and exact context matching, then returns the
+would-be touched files and generated standard unified diff without writing any
+file. Dry-run validation is treated as read-only: it does not request edit
+approval and does not create an undo record. The system prompt now directs the
+model to dry-run complex or uncertain patches first, then resend the same patch
+with `dry_run=false` only after the generated diff matches the user request.
 
 Focused coverage verifies multiple files, ordered hunks, stale context,
 workspace escapes, binary rejection, and write-failure rollback.
@@ -220,6 +228,41 @@ Acceptance criteria:
 Recommended effort:
 
 - High value, medium-high risk. Do this only after context work or if demo tasks need richer edits.
+
+## Priority 3A: Environment Detection Tool
+
+### Status: Implemented
+
+The local Agent Core now exposes `inspect_environment` as a bounded, read-only
+environment snapshot tool. It helps the model choose a viable verification
+command in an unfamiliar project without turning environment inspection into a
+second arbitrary command runner.
+
+The tool reports:
+
+- platform, Python version, and the detected shell name
+- fixed version probes for common runtimes, compilers, build tools, and package
+  managers, with per-probe availability and failure information
+- project marker files and inferred ecosystems in the selected workspace
+  directory
+- presence of a small allowlist of configuration variables, without returning
+  their values
+- point-in-time bind availability for bounded localhost development ports
+
+All probes run locally with `shell=False`, fixed arguments, bounded timeouts,
+and capped output. The model cannot pass an arbitrary executable or command to
+this tool, and the tool never installs packages, edits files, or contacts a
+network service. Workspace paths still pass through `Workspace`, and invalid
+ports, file paths, and workspace escapes become structured tool failures.
+
+Focused tests cover tool registration, project marker detection, empty
+workspaces, port results, secret-value redaction, fixed subprocess invocation,
+argument validation, and directory-boundary errors.
+
+The original UI milestone below keeps its historical `Priority 3` label because
+it was completed before this capability track was introduced. This `Priority
+3A` label makes the numbering history explicit instead of silently renaming
+completed documentation.
 
 ## Priority 3: Web UI Upgrade
 
@@ -321,6 +364,36 @@ Recommended effort:
 
 - Medium-high value, low-medium risk. Good for polish after core upgrades.
 
+## Priority 4A: Local Process Management
+
+### Status: Implemented
+
+The Agent now has a local `manage_process` tool for development servers and
+interactive programs that need to remain alive across multiple tool calls. Its
+explicit operations are `start`, `list`, `status`, `read`, `write`, and `stop`.
+
+The implementation uses argument-array subprocess creation with `shell=False`,
+validates every start directory through `Workspace`, returns an opaque process
+handle, and drains stdout/stderr concurrently into bounded per-process buffers.
+The model can send exact UTF-8 stdin text, inspect a process without blocking,
+and stop it gracefully or forcefully with a bounded cleanup wait. Starting,
+writing, and stopping require the existing local approval gate; list, status,
+and read are read-only.
+
+The tool is intentionally not a general shell, service supervisor, package
+installer, or process-tree manager. It does not restore processes across Agent
+sessions, and finished records are capped to keep memory use bounded. This is
+enough to demonstrate reliable local long-running execution while preserving
+the assignment's explainable self-implemented architecture.
+
+Focused tests cover a stdin-driven process lifecycle, status and list results,
+output draining and truncation, exited processes, unsafe commands and paths,
+argument-array validation, and operation-specific approval decisions.
+
+The original observability milestone below keeps its historical `Priority 4`
+label; this capability is recorded as `Priority 4A` to preserve the earlier
+milestone history.
+
 ## Priority 4: Observability and Replay
 
 Status: implemented as a read-only JSONL trace and timeline viewer.
@@ -360,6 +433,37 @@ Acceptance criteria:
 Recommended effort:
 
 - Medium value, low risk.
+
+## Priority 5A: File Type and Encoding Detection
+
+### Status: Implemented
+
+The existing `get_file_info` inspection tool now provides a richer local file
+classification contract without adding a dependency or a second overlapping
+tool. In addition to size, timestamps, binary status, and line count, it reports
+`type_category`, human-readable `file_type`, `mime_type`, and the type detection
+method (`magic`, `extension`, `mimetypes`, or `fallback`).
+
+For text files it reports the best-effort encoding, confidence, and detection
+method. BOMs such as UTF-8, UTF-16, and UTF-32 receive high-confidence results;
+UTF-8 is detected directly; and common legacy encodings including GB18030 are
+tried through a deliberately small standard-library heuristic. Known binary
+magic bytes and extensions override an accidental successful text decode, so
+PNG, PDF, ZIP, executable, SQLite, and similar files remain clearly marked as
+binary.
+
+All detection reads only a bounded sample, preserves the original file, and
+returns truncation flags when line counting is incomplete. Unknown or ambiguous
+cases remain explicit through low/medium confidence and detection metadata.
+The Agent prompt now directs the model to inspect uncertain files before
+calling `read_file`, `replace_in_file`, or `apply_patch`.
+
+Focused tests cover UTF-8, BOM-based UTF-16, GB18030, binary magic bytes,
+directories, unknown text, large-file scan limits, and compatibility with the
+existing `get_file_info` fields.
+
+The original planning milestone below keeps its historical `Priority 5` label;
+this capability is recorded as `Priority 5A` to preserve the earlier plan.
 
 ## Priority 5: Agent Planning and Reflection
 
@@ -465,6 +569,34 @@ Acceptance criteria:
 Recommended effort:
 
 - Medium value, variable risk. Add only two or three tools at most before submission.
+
+## Priority 6B: Enhanced Search Tool
+
+### Status: Implemented
+
+The original `search_files` tool is upgraded from simple substring matching to
+a more capable local code-search tool while keeping the old call shape
+compatible. By default it still performs a safe literal, case-sensitive search
+inside the selected Workspace. Optional arguments now allow:
+
+- regular-expression matching with `use_regex=true`
+- case-insensitive matching with `case_sensitive=false`
+- scoped traversal through `path`
+- file filtering through `glob`
+- bounded before/after line snippets through `context_lines`
+- bounded result counts through `max_matches`
+
+The tool still skips ignored directories, symlinks, binary files, and files
+over the search size limit. Invalid regular expressions fail as structured tool
+errors instead of crashing the Agent loop. Results include both the original
+compact string list and `structured_matches` with path, line number, match
+span, line-level truncation flags, and context windows, so the model can
+quickly locate relevant code before calling `read_file`. Long matching and
+context lines are excerpted to keep tool output bounded.
+
+This is intentionally implemented in the existing filesystem tool module
+instead of shelling out to `grep` or `rg`, keeping search behavior portable,
+locally testable, and inside the assignment boundary.
 
 ## Priority 7: Session Persistence
 

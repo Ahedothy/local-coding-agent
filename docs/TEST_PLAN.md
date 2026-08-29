@@ -89,11 +89,16 @@ Scenarios:
 Scenarios:
 
 - finds matching text
+- supports regex matching
+- supports case-insensitive literal matching
+- returns bounded before/after context lines
+- truncates long matching lines without losing the match
 - respects path scope
 - respects optional glob
 - truncates results at max matches
 - skips binary and very large files
 - rejects empty query
+- rejects invalid regex
 - rejects workspace escape
 
 ### `replace_in_file`
@@ -114,6 +119,7 @@ Scenarios:
 - applies standard unified diff hunks to one file
 - applies a standard diff to multiple files
 - applies multiple ordered hunks to one file
+- dry-runs a patch and returns the generated diff without writing files
 - rejects malformed diff headers and hunk line counts
 - rejects stale hunk context without changing any file
 - rejects binary files and workspace escapes
@@ -141,10 +147,13 @@ Scenarios:
 
 Scenarios:
 
-- reports text file size, UTC modification time, UTF-8 encoding, and line count
-- reports binary files without attempting to decode them as text
-- reports directory metadata with no line count
-- marks line scanning as truncated for files above the inspection limit
+- reports text file size, UTC modification time, type, MIME type, encoding,
+  confidence, and line count
+- detects BOM-based UTF-16/UTF-32 and common legacy text encodings
+- reports binary magic types without attempting to decode them as text
+- reports directory metadata with a directory type and no line count
+- marks byte scanning and line counting as truncated for large files
+- exposes the detection method so heuristic results are distinguishable
 - rejects missing paths, workspace escapes, and `.git` paths
 
 #### `list_directory_tree`
@@ -172,6 +181,37 @@ Scenarios:
 - returns a structured failure when Git is unavailable or times out
 - does not expose `.git` metadata or provide Git mutation operations
 - rejects workspace escapes before starting a subprocess
+
+#### `inspect_environment`
+
+Scenarios:
+
+- reports platform and Python information without exposing secret values
+- reports fixed runtime, compiler, build-tool, and package-manager probes
+- preserves per-probe failures when an executable is missing or cannot start
+- detects project marker files and inferred ecosystems in the selected directory
+- reports an empty project marker list for an empty workspace
+- checks only bounded localhost ports and returns structured availability
+- rejects duplicate or out-of-range ports through Pydantic validation
+- rejects a file path and workspace escapes before inspecting project markers
+- never accepts or executes an arbitrary command
+
+### Priority 4A local process management
+
+#### `manage_process`
+
+Scenarios:
+
+- starts a local process with an argument array and returns a process handle
+- keeps a long-running process responsive while stdout and stderr are drained
+- lists managed process status without returning unbounded output
+- reads bounded output and supports clearing the returned buffer
+- writes explicit stdin text to a running process
+- reports a normal exited process and its return code
+- stops a process gracefully and supports bounded forced cleanup
+- rejects shell strings, blocked executables, workspace escapes, and missing handles
+- applies approval only to `start`, `write`, and `stop`, not to `list`, `status`, or `read`
+- caps active/retained process records and per-stream output buffers
 
 ## 3. ToolRegistry and ToolExecutor Tests
 

@@ -67,6 +67,47 @@ def test_edit_waits_for_approval_and_can_be_reverted(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "value = 1\n"
 
 
+def test_apply_patch_dry_run_does_not_request_approval_or_create_undo(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    gate = ApprovalGate()
+    changes = ChangeStore(Workspace(tmp_path))
+    events = []
+    executor = ToolExecutor(
+        ToolRegistry(EDIT_TOOLS),
+        event_handler=events.append,
+        approval_gate=gate,
+        change_store=changes,
+    )
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(
+                id="dry-run-patch",
+                name="apply_patch",
+                arguments={
+                    "dry_run": True,
+                    "patch": """--- a/main.py
++++ b/main.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+""",
+                },
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is True
+    assert result.output["dry_run"] is True
+    assert path.read_text(encoding="utf-8") == "value = 1\n"
+    assert not changes.records
+    assert AgentEventType.APPROVAL_REQUESTED not in [event.type for event in events]
+
+
 def test_rejected_edit_never_touches_the_workspace(tmp_path: Path) -> None:
     path = tmp_path / "main.py"
     path.write_text("value = 1\n", encoding="utf-8")

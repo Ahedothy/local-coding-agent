@@ -22,7 +22,9 @@ from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.command import COMMAND_TOOLS
 from coding_agent.tools.edit import EDIT_TOOLS
 from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
+from coding_agent.tools.environment import ENVIRONMENT_TOOLS
 from coding_agent.tools.inspection import INSPECTION_TOOLS
+from coding_agent.tools.process import ManageProcessTool
 from coding_agent.workspace import Workspace
 
 
@@ -32,6 +34,22 @@ SYSTEM_PROMPT = (
     "not a shell string. On Windows, run workspace-local executables with "
     ".\\program.exe. Treat a command as successful only when the tool result "
     "has success=true, returncode=0, and the expected stdout is present. "
+    "Use search_files to locate code before reading many files; prefer regex "
+    "search with a small context_lines value when looking for definitions, "
+    "call sites, TODOs, or error messages across a project. "
+    "When the task depends on installed runtimes, compilers, package managers, "
+    "project markers, or local development ports, use inspect_environment first. "
+    "It is read-only and only performs fixed local version probes; never use it "
+    "as a substitute for arbitrary command execution. "
+    "For long-running local services or interactive stdin tasks, use "
+    "manage_process with start/list/status/read/write/stop. Keep the returned "
+    "process_id, use an argument array, and stop processes when verification is "
+    "finished; do not simulate a persistent service with repeated execute_command "
+    "calls. "
+    "Before reading or editing an unfamiliar file, use get_file_info when its "
+    "type, binary status, or encoding is uncertain. Respect its file_type, "
+    "mime_type, encoding, encoding_confidence, and detection method; do not "
+    "send known binary files to read_file or text editing tools. "
     "Choose the editing tool deliberately: use replace_in_file only for one "
     "small contiguous exact replacement, usually one line or short snippet. "
     "For edits affecting two or more lines, multiple locations, code structure, "
@@ -47,7 +65,11 @@ SYSTEM_PROMPT = (
     "For every hunk, make the old/new line counts exactly match the following "
     "context, removed, and added lines. Count each hunk explicitly: old count "
     "equals context lines plus removed lines, and new count equals context lines "
-    "plus added lines; even a blank context line must start with one space. If "
+    "plus added lines; even a blank context line must start with one space. "
+    "When a patch is complex or you are unsure about line counts, first call "
+    "apply_patch with dry_run=true. If the dry-run succeeds and the generated "
+    "diff matches the requested edit, call apply_patch again with the same patch "
+    "and dry_run=false. If "
     "apply_patch fails, never resend the same patch; read the file again and "
     "regenerate it. Only use replace_in_file as a fallback when the requested "
     "change is truly one small contiguous exact replacement. Never call "
@@ -117,7 +139,7 @@ def _build_event_handler(event_log: Path | None):
 
 def _build_agent(workspace: Workspace, provider, event_handler) -> Agent:
     registry = ToolRegistry(
-        (*FILESYSTEM_TOOLS, *INSPECTION_TOOLS, *EDIT_TOOLS, *COMMAND_TOOLS)
+        (*FILESYSTEM_TOOLS, *INSPECTION_TOOLS, *ENVIRONMENT_TOOLS, ManageProcessTool(), *EDIT_TOOLS, *COMMAND_TOOLS)
     )
     session = Session(workspace_root=workspace.root)
     tool_context = ToolContext(session_id=session.session_id, workspace=workspace)

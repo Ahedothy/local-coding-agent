@@ -312,11 +312,11 @@ textarea:focus, .input-with-icon:focus-within { border-color: #59a98d; box-shado
 .code-lines li:hover { background: #eef7f3; }
 .line-number { padding-right: 11px; color: #a8b1b7; text-align: right; user-select: none; }
 .code-lines code { color: #34444e; white-space: pre; }
-.syntax-comment { color: #8b979d; font-style: italic; }
-.syntax-string { color: #a15c38; }
-.syntax-number { color: #3e6f9f; }
-.syntax-keyword { color: #176b56; font-weight: 700; }
-.syntax-function { color: #765b9b; }
+.syntax-comment { color: #708078; font-style: italic; }
+.syntax-string { color: #b54f4f; }
+.syntax-number { color: #2f78a6; }
+.syntax-keyword { color: #356bc1; font-weight: 700; }
+.syntax-function { color: #7956a3; }
 .preview-state { min-height: 260px; margin-top: 14px; border: 1px dashed #d5dee4; background: #f8fafb; }
 .preview-state p { margin: 0; color: #52616b; font-size: 11px; font-weight: 700; }
 .preview-state span { color: #84909a; font-size: 10px; }
@@ -551,6 +551,54 @@ h4.markdown-heading, h5.markdown-heading, h6.markdown-heading { font-size: 15px;
 .undo-button:hover { background: #e0f1eb; }
 .change-reverted { display: inline-flex; align-items: center; gap: 5px; color: #2c9b76; font-size: 11px; }
 .replay-badge { display: inline-flex; align-items: center; gap: 5px; color: #71808c; font-size: 11px; }
+
+/* Keep project conversations easy to scan without turning the history into cards. */
+.history-list .history-item {
+  border-bottom: 1px solid #edf1f3;
+  border-radius: 0;
+}
+.history-list .history-item:last-child { border-bottom: 0; }
+.history-list .history-item:hover,
+.history-list .history-item.is-selected { border-radius: 5px; }
+
+/* Markdown files use the same readable renderer as agent answers. */
+.markdown-preview-frame {
+  min-height: 470px;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  padding: 16px 17px;
+  border: 1px solid #e2e8ee;
+  background: #fbfcfd;
+}
+.file-preview-markdown .markdown-answer {
+  color: #34444e;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.file-preview-markdown .markdown-heading { color: #26343e; }
+.file-preview-markdown .markdown-heading:first-child { margin-top: 0; }
+.file-preview-markdown .markdown-paragraph { margin-bottom: 13px; }
+.file-preview-markdown .markdown-code-block { margin: 14px 0; background: #f4f7f8; }
+.file-preview-markdown .markdown-list { padding-left: 23px; }
+.file-preview-markdown .markdown-quote { color: #60716b; background: #f7fbf9; }
+.file-preview-markdown .markdown-answer a { overflow-wrap: anywhere; }
+
+/* Use the familiar Markdown/system editor stack for all code-oriented surfaces. */
+:root { --code-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.code-lines li,
+.markdown-inline-code,
+.markdown-code-block,
+.diff-file-summary-main code,
+.diff-file-stats,
+.diff-file-body,
+.approval-field code,
+.approval-preview { font-family: var(--code-font-family); }
+.file-preview-code-frame { padding: 0; background: #fbfcfd; }
+.file-preview-code-frame .markdown-code-block { min-height: 100%; margin: 0; border: 0; border-radius: 0; background: transparent; }
+.code-preview-line { display: block; min-height: 1.55em; }
+
+/* Give the preview enough room for code and prose while preserving a dominant chat pane. */
+.console-layout { grid-template-columns: var(--left-pane-width) 8px minmax(0, 1fr) 8px var(--right-pane-width); }
 
 /* Readable light-console scale */
 .section-kicker { font-size: 11px; letter-spacing: .08em; }
