@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from coding_agent.events import AgentEvent
+from coding_agent.trace import summarize_events
 
 from .app import ApiState, RunRecord
 from .schemas import (
@@ -17,6 +19,8 @@ from .schemas import (
     ApprovalResponse,
     CreateSessionRequest,
     DirectorySelectionResponse,
+    HistoryRecordResponse,
+    HistorySummaryResponse,
     RunRequest,
     RunResponse,
     RevertChangeResponse,
@@ -29,16 +33,36 @@ from coding_agent.workspace import Workspace
 
 def _scan_workspace_entries(root: Path) -> list[WorkspaceEntryResponse]:
     entries: list[WorkspaceEntryResponse] = []
-    for path in root.rglob("*"):
-        relative = path.relative_to(root)
-        if ".git" in {part.casefold() for part in relative.parts}:
+    pending = [root]
+    while pending and len(entries) < 1000:
+        current = pending.pop(0)
+        try:
+            with os.scandir(current) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name.casefold())
+        except OSError:
             continue
-        entries.append(
-            WorkspaceEntryResponse(
-                path=relative.as_posix(),
-                kind="directory" if path.is_dir() else "file",
+        for child in children:
+            if len(entries) >= 1000:
+                break
+            try:
+                relative = Path(child.path).relative_to(root)
+                if ".git" in {part.casefold() for part in relative.parts}:
+                    continue
+                if child.is_symlink():
+                    continue
+                is_directory = child.is_dir(follow_symlinks=False)
+                if not is_directory and not child.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            entries.append(
+                WorkspaceEntryResponse(
+                    path=relative.as_posix(),
+                    kind="directory" if is_directory else "file",
+                )
             )
-        )
+            if is_directory:
+                pending.append(Path(child.path))
     return sorted(
         entries,
         key=lambda entry: (entry.path.count("/"), entry.kind != "directory", entry.path.casefold()),
@@ -51,6 +75,48 @@ def _sse_message(event: AgentEvent) -> str:
         f"event: {event.type.value}\n"
         f"data: {event.model_dump_json()}\n\n"
     )
+
+
+def _history_summary(
+    run_id: str,
+    events: list[AgentEvent],
+    *,
+    turn_count: int | None = None,
+    title: str | None = None,
+    title_status: str | None = None,
+) -> HistorySummaryResponse:
+    summary = summarize_events(events)
+    started_at = events[0].timestamp.isoformat() if events else None
+    finished_at = events[-1].timestamp.isoformat() if events else None
+    resolved_title = title or (summary.tasks[0] if summary.tasks else "New conversation")
+    resolved_title_status = title_status or ("ready" if summary.tasks else "pending")
+    return HistorySummaryResponse(
+        run_id=run_id,
+        session_id=summary.session_id or "unknown",
+        workspace_root=summary.workspace_root,
+        task=summary.tasks[-1] if summary.tasks else None,
+        title=resolved_title,
+        title_status=resolved_title_status,
+        status=summary.status or "running",
+        started_at=started_at,
+        finished_at=finished_at if summary.status else None,
+        duration_seconds=summary.run_duration_seconds,
+        iterations=summary.iterations,
+        tool_calls=summary.tool_calls,
+        event_count=summary.event_count,
+        turn_count=turn_count if turn_count is not None else max(1, len(summary.tasks)),
+        error=summary.error,
+    )
+
+
+def _read_session_history(state: ApiState, session_id: str) -> tuple[str, list[AgentEvent]]:
+    """Read all recorded turns for one session in chronological order."""
+    run_ids = state.history_store.list_run_ids_for_session(session_id)
+    events = state.history_store.read_session(session_id)
+    if not run_ids or not events:
+        return "", []
+    events.sort(key=lambda event: event.timestamp)
+    return run_ids[0], events
 
 
 async def _event_stream(run: RunRecord):
@@ -104,6 +170,97 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return DirectorySelectionResponse(workspace_root=workspace.root)
+
+    @app.get("/history", response_model=list[HistorySummaryResponse])
+    async def list_history(limit: int = 50) -> list[HistorySummaryResponse]:
+        """List persisted conversations without restoring or executing Agent state."""
+        bounded_limit = max(1, min(limit, 200))
+        grouped: dict[str, list[tuple[str, list[AgentEvent]]]] = {}
+        for run_id in state.history_store.list_run_ids():
+            try:
+                events = state.history_store.read(run_id)
+                if events and events[0].session_id:
+                    grouped.setdefault(events[0].session_id, []).append((run_id, events))
+            except ValueError:
+                # A partially written or manually damaged log is not allowed to
+                # make the rest of the local history unavailable.
+                continue
+        history: list[HistorySummaryResponse] = []
+        for session_runs in grouped.values():
+            session_events = [event for _, events in session_runs for event in events]
+            session_events.sort(key=lambda event: event.timestamp)
+            history.append(
+                _history_summary(
+                    session_runs[0][0],
+                    session_events,
+                    turn_count=sum(event.type.value == "user_message" for event in session_events),
+                    title=state.history_store.get_session_title(session_events[0].session_id),
+                    title_status=state.history_store.get_session_title_status(session_events[0].session_id),
+                )
+            )
+        return history[:bounded_limit]
+
+    @app.get("/history/sessions/{session_id}", response_model=HistoryRecordResponse)
+    async def read_session_history(session_id: str) -> HistoryRecordResponse:
+        """Return a complete conversation for read-only replay."""
+        latest_run_id, events = _read_session_history(state, session_id)
+        if not events:
+            raise HTTPException(status_code=404, detail="session history is empty")
+        return HistoryRecordResponse(
+            summary=_history_summary(
+                latest_run_id,
+                events,
+                turn_count=sum(event.type.value == "user_message" for event in events),
+                title=state.history_store.get_session_title(session_id),
+                title_status=state.history_store.get_session_title_status(session_id),
+            ),
+            events=events,
+        )
+
+    @app.get("/history/{run_id}", response_model=HistoryRecordResponse)
+    async def read_history(run_id: str) -> HistoryRecordResponse:
+        """Return a recorded run for read-only replay."""
+        try:
+            events = state.history_store.read(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not events:
+            raise HTTPException(status_code=404, detail="run history is empty")
+        return HistoryRecordResponse(
+            summary=_history_summary(
+                run_id,
+                events,
+                title=state.history_store.get_session_title(events[0].session_id),
+                title_status=state.history_store.get_session_title_status(events[0].session_id),
+            ),
+            events=events,
+        )
+
+    @app.post("/history/{run_id}/continue", response_model=SessionResponse)
+    async def continue_history(run_id: str) -> SessionResponse:
+        """Restore the historical context for a new user turn."""
+        try:
+            session = state.resume_history(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return SessionResponse(
+            session_id=session.session_id,
+            workspace_root=session.workspace.root,
+        )
+
+    @app.post("/history/sessions/{session_id}/activate", response_model=SessionResponse)
+    async def activate_history_session(session_id: str) -> SessionResponse:
+        """Switch to a conversation and keep it writable for future turns."""
+        try:
+            session, live_run = state.activate_history(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return SessionResponse(
+            session_id=session.session_id,
+            workspace_root=session.workspace.root,
+            status="running" if live_run is not None else "idle",
+            run_id=live_run.run_id if live_run is not None else None,
+        )
 
     @app.get("/sessions/{session_id}/files", response_model=list[WorkspaceEntryResponse])
     async def list_session_files(session_id: str) -> list[WorkspaceEntryResponse]:

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
 
-from coding_agent.agent import Agent, AgentRunResult, Session
+from coding_agent.agent import Agent, AgentRunResult, Session, SessionStatus
 from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
-from coding_agent.events import AgentEvent
+from coding_agent.events import AgentEvent, SqliteRunStore
 from coding_agent.models import OpenAICompatibleProvider
 from coding_agent.tools import ApprovalGate, ChangeStore, ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.command import COMMAND_TOOLS
@@ -77,6 +79,20 @@ _configure_windows_subprocess_loop()
 AgentFactory = Callable[[Workspace, Callable[[AgentEvent], object]], Agent]
 
 
+def _title_from_first_message(message: str) -> str:
+    """Create a stable local history title from the first message."""
+    title = " ".join(message.split()).strip()
+    return title[:36].rstrip() + ("..." if len(title) > 36 else "")
+
+
+def _default_history_database() -> Path:
+    configured = os.getenv("CODING_AGENT_HISTORY_DIR")
+    if configured:
+        configured_path = Path(configured).expanduser()
+        return configured_path if configured_path.suffix.casefold() == ".db" else configured_path / "history.db"
+    return Path(__file__).resolve().parents[2] / "history.db"
+
+
 def _default_agent_factory(
     workspace: Workspace,
     event_handler: Callable[[AgentEvent], object],
@@ -109,9 +125,30 @@ class RunRecord:
     finished: bool = False
     result: AgentRunResult | None = None
     error: str | None = None
+    history_store: SqliteRunStore | None = None
 
     async def append_event(self, event: AgentEvent) -> None:
         self.events.append(event)
+        if self.history_store is not None:
+            self.history_store.append(self.run_id, event)
+            self.history_store.save_session(
+                self.agent.session,
+                self.agent.context_manager,
+            )
+            if event.type.value == "user_message":
+                content = event.payload.get("content")
+                if isinstance(content, str):
+                    if self.history_store.begin_session_title(event.session_id):
+                        self.history_store.set_session_title_if_default(
+                            event.session_id,
+                            _title_from_first_message(content),
+                        )
+            self.history_store.save_run_state(
+                self.run_id,
+                self.agent.session,
+                self.agent.context_manager,
+                {"turn_index": self.agent.turn_index},
+            )
         self.wakeup.set()
 
 
@@ -127,10 +164,19 @@ class SessionRecord:
 
 
 class ApiState:
-    """In-memory API state; persistence is intentionally outside this milestone."""
+    """Live API state backed by local SQLite run history."""
 
-    def __init__(self, agent_factory: AgentFactory) -> None:
+    def __init__(
+        self,
+        agent_factory: AgentFactory,
+        history_store: SqliteRunStore | None = None,
+    ) -> None:
         self.agent_factory = agent_factory
+        self.history_store = history_store or SqliteRunStore(
+            _default_history_database(),
+            legacy_jsonl_directory=Path.home() / ".lvyiyou-coding-agent" / "history",
+            initialize=False,
+        )
         self.sessions: dict[str, SessionRecord] = {}
         self.runs: dict[str, RunRecord] = {}
 
@@ -139,7 +185,13 @@ class ApiState:
             return
         await session.current_run.append_event(event)
 
-    def create_session(self, workspace: Workspace) -> SessionRecord:
+    def _create_session_record(
+        self,
+        workspace: Workspace,
+        *,
+        restored_session: Session | None = None,
+        restored_context: ContextManager | None = None,
+    ) -> SessionRecord:
         holder: dict[str, SessionRecord | None] = {"record": None}
 
         async def on_event(event: AgentEvent) -> None:
@@ -148,6 +200,16 @@ class ApiState:
                 await self._on_event(record, event)
 
         agent = self.agent_factory(workspace, on_event)
+        if restored_session is not None:
+            restored_session.status = SessionStatus.IDLE
+            agent.session = restored_session
+            agent.tool_context.session_id = restored_session.session_id
+            agent.tool_context.workspace = workspace
+            # Emit a fresh session_started event for the resumed run while
+            # keeping the restored conversation context intact.
+            agent._session_started = False
+        if restored_context is not None:
+            agent.context_manager = restored_context
         approval_gate = ApprovalGate()
         change_store = ChangeStore(workspace)
         agent.tool_executor.approval_gate = approval_gate
@@ -162,6 +224,81 @@ class ApiState:
         holder["record"] = record
         self.sessions[record.session_id] = record
         return record
+
+    def create_session(self, workspace: Workspace) -> SessionRecord:
+        return self._create_session_record(workspace)
+
+    def resume_history(self, run_id: str) -> SessionRecord:
+        """Restore a completed session snapshot so a later turn can continue."""
+        events = self.history_store.read(run_id)
+        if not events:
+            raise ValueError("run history is empty")
+        session_id = events[0].session_id
+        saved = self.history_store.load_run_state(run_id)
+        if saved is None:
+            # Compatibility fallback for histories written before per-run
+            # snapshots were introduced. New runs always use the exact state
+            # captured for this run above.
+            saved = self.history_store.load_session(session_id)
+        if saved is None:
+            raise ValueError("this run has no resumable session snapshot")
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            if existing.current_run is not None and not existing.current_run.finished:
+                raise ValueError("the historical session is already running")
+        try:
+            restored_session = Session.model_validate(saved["session"])
+            workspace = Workspace(restored_session.workspace_root)
+            restored_context = ContextManager.from_state(saved["context"])
+        except Exception as exc:
+            raise ValueError(f"could not restore historical session: {exc}") from exc
+        record = self._create_session_record(
+            workspace,
+            restored_session=restored_session,
+            restored_context=restored_context,
+        )
+        record.agent.restore_runtime_state(saved.get("runtime", {}))
+        return record
+
+    def activate_history(self, session_id: str) -> tuple[SessionRecord, RunRecord | None]:
+        """Activate a session without cancelling any other live session run."""
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            live_run = existing.current_run
+            if live_run is not None and not live_run.finished:
+                return existing, live_run
+            return existing, None
+
+        latest_run_id: str | None = None
+        for run_id in self.history_store.list_run_ids():
+            try:
+                events = self.history_store.read(run_id)
+            except ValueError:
+                continue
+            if events and events[0].session_id == session_id:
+                latest_run_id = run_id
+                break
+        if latest_run_id is None:
+            raise ValueError("session history is empty")
+
+        saved = self.history_store.load_run_state(latest_run_id)
+        if saved is None:
+            saved = self.history_store.load_session(session_id)
+        if saved is None:
+            raise ValueError("this session has no resumable state")
+        try:
+            restored_session = Session.model_validate(saved["session"])
+            workspace = Workspace(restored_session.workspace_root)
+            restored_context = ContextManager.from_state(saved["context"])
+        except Exception as exc:
+            raise ValueError(f"could not activate historical session: {exc}") from exc
+        record = self._create_session_record(
+            workspace,
+            restored_session=restored_session,
+            restored_context=restored_context,
+        )
+        record.agent.restore_runtime_state(saved.get("runtime", {}))
+        return record, None
 
     async def start_run(
         self,
@@ -180,6 +317,7 @@ class ApiState:
                 run_id=str(uuid4()),
                 session_id=session.session_id,
                 agent=session.agent,
+                history_store=self.history_store,
             )
             session.current_run = run
             self.runs[run.run_id] = run
@@ -204,9 +342,15 @@ class ApiState:
                     session.current_run = None
 
 
-def create_app(agent_factory: AgentFactory | None = None) -> FastAPI:
+def create_app(
+    agent_factory: AgentFactory | None = None,
+    history_store: SqliteRunStore | None = None,
+) -> FastAPI:
     """Create the API application with injectable Agent composition for tests."""
-    state = ApiState(agent_factory or _default_agent_factory)
+    state = ApiState(
+        agent_factory or _default_agent_factory,
+        history_store=history_store,
+    )
     app = FastAPI(title="lvyiyou Coding Agent API")
     app.state.agent_state = state
 

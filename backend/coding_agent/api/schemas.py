@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from coding_agent.events import AgentEvent
+
 
 class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -39,6 +41,8 @@ class SessionResponse(BaseModel):
 
     session_id: str
     workspace_root: Path
+    status: str = "idle"
+    run_id: str | None = None
 
 
 class RunRequest(BaseModel):
@@ -54,6 +58,33 @@ class RunResponse(BaseModel):
     run_id: str
     session_id: str
     status: str
+
+
+class HistorySummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    session_id: str
+    workspace_root: Path | None = None
+    task: str | None = None
+    title: str = "New conversation"
+    title_status: str = "pending"
+    status: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float | None = None
+    iterations: int = 0
+    tool_calls: int = 0
+    event_count: int = 0
+    turn_count: int = 1
+    error: str | None = None
+
+
+class HistoryRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: HistorySummaryResponse
+    events: list[AgentEvent]
 
 
 class CancelResponse(BaseModel):

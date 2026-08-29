@@ -222,7 +222,8 @@ Non-responsibilities:
 
 - no business logic
 - no control flow decisions
-- no durable session restore in MVP
+- no restoration of live Agent state during replay; read-only run history may
+  be persisted separately as JSONL
 
 ## Agent Loop
 
@@ -291,9 +292,12 @@ Required design rules:
 - Cancellation applies to the currently running turn, not to the entire conversation object.
 - Interactive CLI is only a transport wrapper. It must not implement the agent loop, tool routing, context truncation, or model parsing.
 
-Multi-turn conversation state remains in memory. Priority 4 adds read-only analysis
-of explicitly recorded JSONL events, but does not restore Agent state, persist
-conversation context, or introduce SQLite.
+Multi-turn conversation state remains in memory during normal execution. The Web
+API additionally persists completed and partially recorded runs in a local
+SQLite store. Each run has its own bounded `Session`/`ContextManager` snapshot,
+so continuing an older run restores that exact conversation point instead of
+silently using a newer session snapshot. Replay still only parses recorded
+events and never restores live tool execution or approval futures.
 
 ## Tool System
 
@@ -461,10 +465,24 @@ Chosen for one-way event streaming. WebSocket is not needed for MVP.
 
 ### JSONL and trace replay
 
-JSONL is the optional append-only event log. The `coding_agent.trace` module reads
-that log without executing tools or restoring a live Agent. It produces a
-deterministic summary and chronological timeline for debugging and demo review.
-SQLite and session restore are intentionally out of scope.
+JSONL remains the append-only event format for CLI logs and trace replay. The
+Web API uses a local SQLite run store for indexed run metadata, complete event
+streams, and bounded session snapshots. The store keeps both the latest
+session snapshot and an exact snapshot per run. The `coding_agent.trace` module
+  and the Web UI replay reader parse recorded data without executing tools.
+The history list is session-oriented: several per-turn run records are grouped
+into one conversation entry, while each run remains independently replayable
+and resumable at its own snapshot. Loading a replay does not switch or scan
+the current workspace; only an explicit continue action restores the recorded
+workspace. A session starts with the display title `New conversation`; its
+first user message produces one stable local title by whitespace normalization
+and truncation. The title is stored as session metadata and is never
+overwritten by later turns. Session identity always comes from `session_id`,
+never from the display title, so identical titles remain separate
+conversations.
+Replay is read-only; an explicit continue action restores the selected run's
+workspace, context, and turn counter, then starts a new turn without resuming
+an old tool call or approval.
 
 ### Editing tools
 

@@ -10,6 +10,7 @@ A student-built coding agent whose important logic is implemented locally:
 - workspace path and command safety boundary
 - bounded ContextManager
 - in-memory multi-turn conversation
+- local SQLite run history, replay, and resumable conversations
 - deterministic MockModelProvider tests
 
 The project does not use LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK,
@@ -102,6 +103,30 @@ call and a short reflection after later tool results. These are optional event
 annotations around the existing Agent loop, and simple tasks can still go
 directly to an answer.
 
+Run History and Replay
+----------------------
+
+The Web API records run metadata, every event, the latest session state, and an
+exact bounded snapshot for each run in a local SQLite database. The default database is located in the
+backend data directory:
+
+    backend\history.db
+
+Set `CODING_AGENT_HISTORY_DIR` to choose another local database path (or a
+directory in which `history.db` should be created). The Web UI loads this
+history into Recent tasks, grouped by conversation session. A new session is
+shown immediately as `New conversation`; after its first message, a short
+stable title is generated from that message and is never changed by later
+runs. Selecting a task
+replays all recorded turns, tool activity, approvals, errors, final answers,
+and changes for that session. Replay is read-only: it never calls the model,
+executes tools, restores a pending approval, or changes the current workspace.
+The `Continue` action then restores the historical workspace and the latest
+bounded ContextManager snapshot for that conversation, and creates a new user
+turn in the same conversation. Tool output is bounded but is not
+automatically secret-redacted, so keep a custom history database local and do
+not use it for shared or sensitive logs.
+
 Interactive Multi-Turn Mode
 ----------------------------
 
@@ -178,7 +203,9 @@ backend manually after changing Python code.
 
 The web session supports multiple user turns while the browser page and backend
 process remain alive. Refreshing the page or changing the workspace creates a
-new in-memory session.
+new in-memory session, while completed run history remains available through
+the local SQLite history store. A historical conversation can be continued
+explicitly from Recent tasks.
 
 Local Inspection Tools
 ----------------------

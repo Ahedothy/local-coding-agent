@@ -171,6 +171,26 @@ def test_context_stats_report_message_and_tool_sizes() -> None:
     assert stats["total_chars"] <= stats["max_chars"]
 
 
+def test_context_state_round_trip_preserves_tool_message_contract() -> None:
+    context = ContextManager("System", max_chars=500, recent_message_groups=2)
+    call = ToolCall(id="call-1", name="read_file", arguments={"path": "main.py"})
+    context.add_user_message("Inspect main.py")
+    context.add_assistant_message("I will inspect it.", tool_calls=[call])
+    context.add_tool_result(
+        ToolResult(
+            tool_call_id="call-1",
+            tool_name="read_file",
+            success=True,
+            output={"path": "main.py", "content": "print('ok')"},
+        )
+    )
+
+    restored = ContextManager.from_state(context.to_state())
+
+    assert restored.get_messages() == context.get_messages()
+    assert restored.stats.as_dict() == context.stats.as_dict()
+
+
 def test_compaction_never_splits_tool_call_group() -> None:
     context = ContextManager("System", max_chars=330, recent_message_groups=1)
     first_call = ToolCall(id="call-1", name="read_file", arguments={"path": "old.py"})

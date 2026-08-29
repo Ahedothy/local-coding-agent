@@ -9,6 +9,8 @@ env/
 .coverage
 htmlcov/
 event_logs/
+.coding-agent/
+history.db
 .pytest-*/
 frontend/node_modules/
 frontend/dist/

@@ -107,6 +107,43 @@ class ContextManager:
         """Return a snapshot of the current messages in conversation order."""
         return [message.model_copy(deep=True) for message in self._messages]
 
+    def to_state(self) -> dict[str, object]:
+        """Export the bounded context for local session persistence."""
+        return {
+            "max_chars": self.max_chars,
+            "max_tool_result_chars": self.max_tool_result_chars,
+            "recent_message_groups": self.recent_message_groups,
+            "enable_compaction": self.enable_compaction,
+            "messages": [message.model_dump(mode="json") for message in self._messages],
+            "summary": self._summary,
+            "compaction_count": self._compaction_count,
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> "ContextManager":
+        """Restore a previously exported context without calling a model."""
+        if not isinstance(state, dict):
+            raise ValueError("saved context must be an object")
+        raw_messages = state.get("messages")
+        if not isinstance(raw_messages, list) or not raw_messages:
+            raise ValueError("saved context must contain messages")
+        messages = [ModelMessage.model_validate(message) for message in raw_messages]
+        if messages[0].role != "system" or not messages[0].content:
+            raise ValueError("saved context must start with a system message")
+        manager = cls(
+            messages[0].content,
+            max_chars=int(state.get("max_chars", 100_000)),
+            max_tool_result_chars=int(state.get("max_tool_result_chars", 20_000)),
+            recent_message_groups=int(state.get("recent_message_groups", 4)),
+            enable_compaction=bool(state.get("enable_compaction", True)),
+        )
+        manager._messages = messages
+        manager._summary = str(state.get("summary", ""))
+        manager._compaction_count = max(0, int(state.get("compaction_count", 0)))
+        manager.last_truncated = False
+        manager.last_change = None
+        return manager
+
     @property
     def total_chars(self) -> int:
         return sum(message_character_count(message) for message in self._messages)

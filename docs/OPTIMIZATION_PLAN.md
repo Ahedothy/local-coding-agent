@@ -468,27 +468,52 @@ Recommended effort:
 
 ## Priority 7: Session Persistence
 
+### Status: Implemented as read-only run history and replay
+
+The Web API now persists each API run in a local SQLite database configured by
+`CODING_AGENT_HISTORY_DIR` (default `backend/history.db`). It stores indexed
+run metadata, complete event streams, the latest session snapshot, and an exact
+bounded `Session`/`ContextManager` snapshot for every run. The history list is
+rebuilt from the database, and the Web UI can load a complete run and render
+its complete session conversation, tool activity, approvals, errors, final
+answers, and diff without starting a model call or executing a local tool.
+The history list groups per-turn runs by session so a continued conversation
+does not appear as a new unrelated chat. Replay is explicitly read-only and
+does not switch or scan the current workspace. An explicit continue action
+restores the selected historical workspace, context, and turn counter for a
+new turn, but never resumes an old tool call or approval future. New sessions
+appear immediately with the placeholder title `New conversation`; the first
+user message gets one local title by whitespace normalization and direct
+truncation, and later runs do not rename the session. History entries are
+keyed by `session_id`, so equal display titles never overwrite or merge
+conversations.
+
 Why this is not urgent:
 
-Persistence sounds impressive, but the assignment focuses on the agent loop and local execution. In-memory multi-turn conversation is easier to explain and already satisfies a useful capability. Persistence is only worth adding if the core and demo are already polished.
+Persistence sounds impressive, but the assignment focuses on the agent loop and local execution. The implementation therefore separates an audit trail from resumable conversation snapshots. The active Agent remains in memory during normal use, while completed and partially recorded API runs can be inspected after a refresh or backend restart and completed sessions can be continued explicitly.
 
-Recommended minimal version:
+Implemented scope:
 
-- Persist event JSONL and enough session metadata to inspect past runs.
-- Do not restore live agent state at first.
-- Add a read-only past-run viewer in the UI.
+- Persist run metadata, events, and bounded per-run session context in SQLite.
+- Do not restore live Agent state, pending tool calls, or approval futures.
+- Provide a read-only past-run viewer in the UI.
+- Provide an explicit continue action for completed sessions.
+- Ignore malformed individual history files without hiding healthy runs.
 
 Avoid before deadline:
 
-- SQLite-backed full conversation restore
+- resuming from an exact earlier per-run snapshot is implemented; do not add
+  live process restoration
 - resuming partially completed tool calls
 - multi-user authentication
 - background job scheduling
 
 Acceptance criteria:
 
-- Past runs can be inspected.
-- No credentials or large tool outputs are persisted by default.
+- Past runs can be inspected after a page refresh or API process restart.
+- History is local-only by default, and tool outputs remain bounded; sensitive
+  values present in a command or file output are not automatically redacted and
+  should therefore not be shown in a shared history directory.
 - Persistence remains optional.
 
 Recommended effort:

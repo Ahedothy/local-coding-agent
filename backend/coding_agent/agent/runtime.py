@@ -82,6 +82,21 @@ class Agent:
         """Request cooperative cancellation at the next safe loop boundary."""
         self._cancel_event.set()
 
+    @property
+    def turn_index(self) -> int:
+        """Return the next conversation turn number that has been allocated."""
+        return self._turn_index
+
+    def restore_runtime_state(self, state: object) -> None:
+        """Restore small runtime counters without restoring live execution."""
+        if not isinstance(state, dict):
+            return
+        raw_turn_index = state.get("turn_index", 0)
+        try:
+            self._turn_index = max(0, int(raw_turn_index))
+        except (TypeError, ValueError):
+            self._turn_index = 0
+
     async def run(self, task: str) -> AgentRunResult:
         """Run one task, preserving the historical one-shot API."""
         return await self.run_turn(task)

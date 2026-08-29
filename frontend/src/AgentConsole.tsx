@@ -20,6 +20,7 @@ import {
   Send,
   ShieldCheck,
   ShieldX,
+  SquarePen,
   Terminal,
   UserRound,
   Wrench,
@@ -35,8 +36,26 @@ type AgentEvent = {
   payload: Record<string, unknown>;
 };
 
-type SessionResponse = { session_id: string; workspace_root: string };
+type SessionResponse = { session_id: string; workspace_root: string; status?: string; run_id?: string | null };
 type RunResponse = { run_id: string; session_id: string; status: string };
+type HistoryItem = {
+  run_id: string;
+  session_id: string;
+  workspace_root?: string | null;
+  task?: string | null;
+  title?: string | null;
+  title_status?: "pending" | "generating" | "ready" | string;
+  status: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_seconds?: number | null;
+  iterations?: number;
+  tool_calls?: number;
+  event_count?: number;
+  turn_count?: number;
+  error?: string | null;
+};
+type HistoryRecord = { summary: HistoryItem; events: AgentEvent[] };
 type ContextStats = {
   total_chars?: number;
   max_chars?: number;
@@ -49,6 +68,12 @@ type WorkspacePhase = "idle" | "selecting" | "loading";
 type PreviewState = "idle" | "loading" | "ready" | "unsupported" | "error";
 type ActivityStep = { event: AgentEvent; events: AgentEvent[] };
 type ConversationTurn = { key: string; userEvent: AgentEvent; events: AgentEvent[] };
+
+function mergeAgentEvents(...groups: AgentEvent[][]): AgentEvent[] {
+  const byId = new Map<string, AgentEvent>();
+  groups.flat().forEach((event) => byId.set(event.event_id, event));
+  return [...byId.values()].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+}
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const eventLabels: Record<string, string> = {
@@ -94,6 +119,25 @@ function iconForEvent(type: string) {
 
 function formatTime(timestamp: string) {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatHistoryDate(timestamp?: string | null) {
+  if (!timestamp) return "--";
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "--" : date.toLocaleDateString();
+}
+
+function normalizeProjectPath(workspaceRoot?: string | null) {
+  return (workspaceRoot ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function projectName(workspaceRoot?: string | null) {
+  const normalized = normalizeProjectPath(workspaceRoot);
+  return normalized.split("/").at(-1) || "Project";
+}
+
+function projectKey(workspaceRoot?: string | null) {
+  return normalizeProjectPath(workspaceRoot).toLocaleLowerCase();
 }
 
 function formatDuration(events: AgentEvent[]) {
@@ -628,16 +672,21 @@ export default function AgentConsole() {
   const [autoApprovalEnabled, setAutoApprovalEnabled] = useState(false);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [run, setRun] = useState<RunResponse | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workspaceExpanded, setWorkspaceExpanded] = useState(true);
   const [historyExpanded, setHistoryExpanded] = useState(true);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [expandedActivityTurns, setExpandedActivityTurns] = useState<Set<string>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("idle");
+  const [projectSwitching, setProjectSwitching] = useState(false);
   const [displayedAnswer, setDisplayedAnswer] = useState("");
   const [answerStreaming, setAnswerStreaming] = useState(false);
+  const [instantAnswerTurnKey, setInstantAnswerTurnKey] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<AgentEvent | null>(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [revertedChanges, setRevertedChanges] = useState<Set<string>>(new Set());
@@ -646,40 +695,85 @@ export default function AgentConsole() {
   const [leftWidth, setLeftWidth] = useState(270);
   const [rightWidth, setRightWidth] = useState(310);
   const eventSource = useRef<EventSource | null>(null);
+  const activeStreamRunId = useRef<string | null>(null);
+  const activeSessionId = useRef<string | null>(null);
+  const workspaceFilesCache = useRef<Map<string, WorkspaceEntry[]>>(new Map());
+  const workspaceRoots = useRef<Map<string, string>>(new Map());
+  const conversationEventsCache = useRef<Map<string, AgentEvent[]>>(new Map());
+  const projectsCollapsedInitially = useRef(false);
   const answerTimer = useRef<number | null>(null);
-  const refreshInFlight = useRef(false);
+  const workspaceRequestsInFlight = useRef<Set<string>>(new Set());
+  const historyRequestInFlight = useRef(false);
+  const titleRefreshTimers = useRef<Map<string, number>>(new Map());
   const selectedFilePathRef = useRef<string | null>(null);
   const previewRequestIdRef = useRef(0);
   const conversationRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => () => eventSource.current?.close(), []);
+  useEffect(() => () => {
+    activeStreamRunId.current = null;
+    eventSource.current?.close();
+    titleRefreshTimers.current.forEach((timer) => window.clearTimeout(timer));
+    titleRefreshTimers.current.clear();
+  }, []);
+
+  useEffect(() => {
+    activeSessionId.current = session?.session_id ?? null;
+  }, [session]);
 
   const contextStats = useMemo(() => {
     const candidate = [...events].reverse().find((event) => typeof event.payload.context === "object");
     return candidate?.payload.context as ContextStats | undefined;
   }, [events]);
   const conversationTurns = useMemo(() => buildConversationTurns(events), [events]);
+  const projectGroups = useMemo(() => {
+    const groups = new Map<string, { key: string; root: string; name: string; items: HistoryItem[] }>();
+    history.forEach((item) => {
+      const key = projectKey(item.workspace_root) || "unknown-project";
+      const group = groups.get(key) ?? {
+        key,
+        root: item.workspace_root ?? "",
+        name: projectName(item.workspace_root),
+        items: [],
+      };
+      group.items.push(item);
+      groups.set(key, group);
+    });
+    return [...groups.values()].sort((left, right) => {
+      const leftActive = projectKey(session?.workspace_root) === left.key;
+      const rightActive = projectKey(session?.workspace_root) === right.key;
+      return Number(rightActive) - Number(leftActive);
+    });
+  }, [history, session?.workspace_root]);
+
+  useEffect(() => {
+    if (projectsCollapsedInitially.current || projectGroups.length === 0) return;
+    projectsCollapsedInitially.current = true;
+    setCollapsedProjects(new Set(projectGroups.map((group) => group.key)));
+  }, [projectGroups]);
   const latestTurn = conversationTurns.at(-1);
   const currentTurnEvents = latestTurn?.events ?? [];
   const latestFinalAnswer = useMemo(() => finalAnswerForEvents(currentTurnEvents), [currentTurnEvents]);
   const runStatus = useMemo(() => {
     if (!session) return "workspace-required";
+    if (run?.status) return run.status;
     const finished = [...events].reverse().find((event) => event.type === "agent_finished");
     return readPayloadString(finished ?? events[0] ?? { payload: {} } as AgentEvent, "status") ?? (busy ? "running" : "ready");
-  }, [busy, events]);
-  const history = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem("lvyiyou-agent-history") ?? "[]") as Array<{ task: string; timestamp: string }>;
-    } catch {
-      return [];
-    }
-  }, [events.length, session]);
+  }, [busy, events, run, session]);
+
+  useEffect(() => {
+    void loadHistory(true);
+  }, []);
 
   useEffect(() => {
     if (answerTimer.current !== null) window.clearInterval(answerTimer.current);
     const answer = latestFinalAnswer ?? "";
     if (!answer) {
       setDisplayedAnswer("");
+      setAnswerStreaming(false);
+      return;
+    }
+    if (instantAnswerTurnKey === latestTurn?.key) {
+      setDisplayedAnswer(answer);
       setAnswerStreaming(false);
       return;
     }
@@ -697,7 +791,7 @@ export default function AgentConsole() {
     }, 16);
     answerTimer.current = timer;
     return () => window.clearInterval(timer);
-  }, [latestFinalAnswer, latestTurn?.key]);
+  }, [instantAnswerTurnKey, latestFinalAnswer, latestTurn?.key]);
 
   useEffect(() => {
     if (!events.length && !displayedAnswer) return;
@@ -714,11 +808,242 @@ export default function AgentConsole() {
     }
   }
 
-  async function createSession(root: string) {
+  async function loadHistory(showLoading = false): Promise<HistoryItem[] | null> {
+    if (historyRequestInFlight.current) return null;
+    historyRequestInFlight.current = true;
+    if (showLoading) setHistoryLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/history?limit=50`);
+      if (!response.ok) throw new Error(await responseError(response, "Could not load run history"));
+      const loaded = (await response.json()) as HistoryItem[];
+      setHistory((current) => {
+        const loadedSessionIds = new Set(loaded.map((item) => item.session_id));
+        const stillRunning = current.filter(
+          (item) => item.status === "running" && !loadedSessionIds.has(item.session_id),
+        );
+        return [...loaded, ...stillRunning].slice(0, 50);
+      });
+      return loaded;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load run history");
+      return null;
+    } finally {
+      historyRequestInFlight.current = false;
+      if (showLoading) setHistoryLoading(false);
+    }
+  }
+
+  function refreshTitleUntilReady(sessionId: string, attempt = 0) {
+    if (attempt >= 8) {
+      titleRefreshTimers.current.delete(sessionId);
+      return;
+    }
+    const previous = titleRefreshTimers.current.get(sessionId);
+    if (previous !== undefined) window.clearTimeout(previous);
+    const delay = attempt === 0 ? 350 : Math.min(3000, 450 * 2 ** attempt);
+    const timer = window.setTimeout(async () => {
+      titleRefreshTimers.current.delete(sessionId);
+      const loaded = await loadHistory();
+      const item = loaded?.find((candidate) => candidate.session_id === sessionId);
+      if (item?.title_status === "pending" || item?.title_status === "generating") {
+        refreshTitleUntilReady(sessionId, attempt + 1);
+      }
+    }, delay);
+    titleRefreshTimers.current.set(sessionId, timer);
+  }
+
+  function subscribeToRun(started: RunResponse, initialEvents: AgentEvent[] = [], workspaceSessionId?: string) {
+    eventSource.current?.close();
+    activeStreamRunId.current = started.run_id;
+    const knownEventIds = new Set(initialEvents.map((event) => event.event_id));
+    const optimisticUserEvent = initialEvents.find(
+      (event) => event.event_id === `optimistic-user-${started.run_id}`,
+    );
+    const isCurrentWorkspace = started.session_id === (workspaceSessionId ?? session?.session_id);
+
+    if (started.status !== "running") {
+      setBusy(false);
+      return;
+    }
+
+    setBusy(true);
+    const source = new EventSource(`${API_BASE}/runs/${started.run_id}/events`);
+    eventSource.current = source;
+    const handleEvent = (message: Event) => {
+      if (activeStreamRunId.current !== started.run_id) return;
+      const event = JSON.parse((message as MessageEvent<string>).data) as AgentEvent;
+      if (knownEventIds.has(event.event_id)) return;
+      knownEventIds.add(event.event_id);
+      const replacesOptimisticUser = Boolean(
+        optimisticUserEvent
+        && event.type === "user_message"
+        && event.payload.content === optimisticUserEvent.payload.content,
+      );
+      setEvents((current) => {
+        const next = replacesOptimisticUser
+          ? current.map((item) => item.event_id === optimisticUserEvent?.event_id ? event : item)
+          : current.some((item) => item.event_id === event.event_id) ? current : [...current, event];
+        conversationEventsCache.current.set(started.session_id, next);
+        return next;
+      });
+      if (event.type === "approval_requested") {
+        setPendingApproval(event);
+        setApprovalBusy(false);
+        setThinkingExpanded(true);
+      }
+      if (event.type === "approval_resolved") {
+        setPendingApproval(null);
+        setApprovalBusy(false);
+      }
+      if (event.type === "user_message") {
+        void loadHistory();
+        refreshTitleUntilReady(started.session_id);
+      }
+      if (isCurrentWorkspace && ["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
+        void loadWorkspaceFiles(started.session_id).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
+        });
+      }
+      if (isCurrentWorkspace && event.type === "tool_finished" && selectedFilePathRef.current) {
+        void selectFile(selectedFilePathRef.current, started.session_id).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : "Could not refresh file preview");
+        });
+      }
+      if (event.type === "agent_finished" || event.type === "agent_error") {
+        setBusy(false);
+        setPendingApproval(null);
+        setApprovalBusy(false);
+        setThinkingExpanded(false);
+        void loadHistory();
+        refreshTitleUntilReady(started.session_id);
+        source.close();
+        if (activeStreamRunId.current === started.run_id) activeStreamRunId.current = null;
+      }
+    };
+    eventTypes.forEach((eventType) => source.addEventListener(eventType, handleEvent));
+    source.onerror = () => {
+      if (activeStreamRunId.current !== started.run_id) return;
+      source.close();
+      setBusy(false);
+      setPendingApproval(null);
+      setApprovalBusy(false);
+      void loadHistory();
+      setError("The event stream closed unexpectedly.");
+    };
+  }
+
+  async function replayHistory(_runId: string, sessionId?: string, targetRoot?: string | null) {
+    if (!sessionId) return;
+    setError(null);
+    eventSource.current?.close();
+    activeStreamRunId.current = null;
+    setBusy(false);
+    const switchingProject = projectKey(session?.workspace_root) !== projectKey(targetRoot);
+    setProjectSwitching(switchingProject);
+    try {
+      if (switchingProject) setWorkspacePhase("loading");
+      const activationResponse = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}/activate`, { method: "POST" });
+      if (!activationResponse.ok) throw new Error(await responseError(activationResponse, "Could not activate this conversation"));
+      const activated = (await activationResponse.json()) as SessionResponse;
+      const cachedEvents = conversationEventsCache.current.get(sessionId) ?? [];
+      const liveRunId = activated.run_id ?? _runId;
+      const liveStatus = activated.status === "running" ? "running" : "completed";
+      const activatedRun: RunResponse = { run_id: liveRunId, session_id: activated.session_id, status: liveStatus };
+      activeSessionId.current = activated.session_id;
+      workspaceRoots.current.set(activated.session_id, activated.workspace_root);
+      setSession(activated);
+      setWorkspaceRoot(activated.workspace_root);
+      setEvents(cachedEvents);
+      setRun(activatedRun);
+      setPendingApproval(null);
+      setApprovalBusy(false);
+      setThinkingExpanded(false);
+      setRevertedChanges(new Set());
+      const loadedTurns = buildConversationTurns(cachedEvents);
+      setInstantAnswerTurnKey(liveStatus === "running" ? null : loadedTurns.at(-1)?.key ?? null);
+      const cachedFiles = workspaceFilesCache.current.get(projectKey(activated.workspace_root));
+      if (switchingProject) setWorkspaceFiles(cachedFiles ?? []);
+      if (switchingProject) {
+        setSelectedFilePath(null);
+        selectedFilePathRef.current = null;
+        previewRequestIdRef.current += 1;
+        setFilePreview(null);
+        setPreviewState("idle");
+        setPreviewMessage("");
+        setWorkspacePhase(cachedFiles ? "idle" : "loading");
+        void loadWorkspaceFiles(activated.session_id).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : "Could not load workspace files");
+        }).finally(() => setProjectSwitching(false));
+      } else {
+        setProjectSwitching(false);
+        setWorkspacePhase("idle");
+      }
+      if (liveStatus === "running") subscribeToRun(activatedRun, cachedEvents, activated.session_id);
+
+      void (async () => {
+        const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}`);
+        if (!response.ok) throw new Error(await responseError(response, "Could not load this conversation"));
+        const record = (await response.json()) as HistoryRecord;
+        conversationEventsCache.current.set(sessionId, mergeAgentEvents(cachedEvents, record.events));
+        setEvents((current) => mergeAgentEvents(current, record.events));
+        if (liveStatus !== "running") {
+          setRun({ run_id: record.summary.run_id, session_id: record.summary.session_id, status: record.summary.status });
+          setInstantAnswerTurnKey(buildConversationTurns(record.events).at(-1)?.key ?? null);
+        }
+      })().catch((reason) => {
+        setError(reason instanceof Error ? reason.message : "Could not load this conversation");
+      });
+    } catch (reason) {
+      setWorkspacePhase("idle");
+      setError(reason instanceof Error ? reason.message : "Could not load this run");
+      setProjectSwitching(false);
+    }
+  }
+
+  async function newConversation(projectRoot?: string) {
+    const root = projectRoot || session?.workspace_root || workspaceRoot;
+    const switchingProject = projectKey(session?.workspace_root) !== projectKey(root);
+    eventSource.current?.close();
+    activeStreamRunId.current = null;
+    setBusy(false);
+    setProjectSwitching(switchingProject);
+    if (switchingProject) {
+      setWorkspacePhase("loading");
+      setWorkspaceFiles([]);
+      setSelectedFilePath(null);
+      selectedFilePathRef.current = null;
+      previewRequestIdRef.current += 1;
+      setFilePreview(null);
+      setPreviewState("idle");
+      setPreviewMessage("");
+    }
+    setEvents([]);
+    setRun(null);
+    setTask("");
+    setInstantAnswerTurnKey(null);
+    setPendingApproval(null);
+    setApprovalBusy(false);
+    setRevertedChanges(new Set());
+    if (root) {
+      await createSession(root, switchingProject);
+      setProjectSwitching(false);
+    } else {
+      setSession(null);
+      setWorkspaceFiles([]);
+      setSelectedFilePath(null);
+      selectedFilePathRef.current = null;
+      setFilePreview(null);
+      setPreviewState("idle");
+      setProjectSwitching(false);
+    }
+  }
+
+  async function createSession(root: string, refreshProject = true) {
     if (!root) return;
     setError(null);
     setEvents([]);
     setRun(null);
+    setInstantAnswerTurnKey(null);
     setAutoApprovalEnabled(false);
     setExpandedActivityTurns(new Set());
     setPendingApproval(null);
@@ -728,8 +1053,19 @@ export default function AgentConsole() {
       const response = await fetch(`${API_BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace_root: root }) });
       if (!response.ok) throw new Error(await responseError(response, "Could not create session"));
       const created = (await response.json()) as SessionResponse;
+      activeSessionId.current = created.session_id;
+      workspaceRoots.current.set(created.session_id, created.workspace_root);
       setSession(created);
-      await loadWorkspaceFiles(created.session_id);
+      if (!refreshProject) {
+        setWorkspacePhase("idle");
+        return;
+      }
+      const cachedFiles = workspaceFilesCache.current.get(projectKey(created.workspace_root));
+      setWorkspaceFiles(cachedFiles ?? []);
+      setWorkspacePhase(cachedFiles ? "idle" : "loading");
+      void loadWorkspaceFiles(created.session_id).catch((reason) => {
+        setError(reason instanceof Error ? reason.message : "Could not load workspace files");
+      });
     } catch (reason) {
       setWorkspacePhase("idle");
       setError(reason instanceof Error ? reason.message : "Could not create session");
@@ -745,57 +1081,50 @@ export default function AgentConsole() {
       answerTimer.current = null;
     }
     setAnswerStreaming(false);
+    setInstantAnswerTurnKey(latestTurn?.key ?? null);
     setThinkingExpanded(true);
     setBusy(true);
     eventSource.current?.close();
+    activeStreamRunId.current = null;
     try {
       const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask, auto_approve: autoApprovalEnabled }) });
       if (!response.ok) throw new Error(await responseError(response, "Could not start run"));
       const started = (await response.json()) as RunResponse;
-      const nextHistory = [{ task: submittedTask, timestamp: new Date().toISOString() }, ...history.filter((item) => item.task !== submittedTask)].slice(0, 8);
-      localStorage.setItem("lvyiyou-agent-history", JSON.stringify(nextHistory));
       setTask("");
       setRun(started);
-      const source = new EventSource(`${API_BASE}/runs/${started.run_id}/events`);
-      eventSource.current = source;
-      const handleEvent = (message: Event) => {
-        const event = JSON.parse((message as MessageEvent<string>).data) as AgentEvent;
-        setEvents((current) => [...current, event]);
-        if (event.type === "approval_requested") {
-          setPendingApproval(event);
-          setApprovalBusy(false);
-          setThinkingExpanded(true);
-        }
-        if (event.type === "approval_resolved") {
-          setPendingApproval(null);
-          setApprovalBusy(false);
-        }
-        if (["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
-          void loadWorkspaceFiles(started.session_id).catch((reason) => {
-            setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
-          });
-        }
-        if (event.type === "tool_finished" && selectedFilePathRef.current) {
-          void selectFile(selectedFilePathRef.current, started.session_id).catch((reason) => {
-            setError(reason instanceof Error ? reason.message : "Could not refresh file preview");
-          });
-        }
-        if (event.type === "agent_finished" || event.type === "agent_error") {
-          setBusy(false);
-          setPendingApproval(null);
-          setApprovalBusy(false);
-          setThinkingExpanded(false);
-          source.close();
-        }
+      const optimisticUserEvent: AgentEvent = {
+        event_id: `optimistic-user-${started.run_id}`,
+        type: "user_message",
+        session_id: started.session_id,
+        timestamp: new Date().toISOString(),
+        iteration: null,
+        payload: {
+          content: submittedTask,
+          turn_index: events.filter((event) => event.type === "user_message").length + 1,
+        },
       };
-      eventTypes.forEach((eventType) => source.addEventListener(eventType, handleEvent));
-      source.onerror = () => {
-        setBusy(false);
-        setPendingApproval(null);
-        setApprovalBusy(false);
-        source.close();
-        setError("The event stream closed unexpectedly.");
-      };
+      setEvents((current) => {
+        const next = [...current, optimisticUserEvent];
+        conversationEventsCache.current.set(started.session_id, next);
+        return next;
+      });
+      setHistory((current) => {
+        const existing = current.find((item) => item.session_id === started.session_id);
+        const optimistic: HistoryItem = {
+          run_id: started.run_id,
+          session_id: started.session_id,
+          workspace_root: session.workspace_root,
+          task: existing?.task ?? submittedTask,
+          title: existing?.title ?? "New conversation",
+          title_status: existing?.title_status ?? "pending",
+          status: "running",
+          started_at: existing?.started_at ?? new Date().toISOString(),
+          turn_count: (existing?.turn_count ?? 0) + 1,
+        };
+        return [optimistic, ...current.filter((item) => item.session_id !== started.session_id)].slice(0, 50);
+      });
+      void loadHistory();
+      subscribeToRun(started, [optimisticUserEvent]);
     } catch (reason) {
       setBusy(false);
       setError(reason instanceof Error ? reason.message : "Could not start run");
@@ -812,13 +1141,15 @@ export default function AgentConsole() {
   }
 
   async function decideApproval(approved: boolean, approveCurrentTurn = false) {
-    if (!session || !pendingApproval) return;
+    if (!pendingApproval) return;
+    const approvalSessionId = run?.session_id ?? session?.session_id;
+    if (!approvalSessionId) return;
     const approvalId = pendingApproval.payload.approval_id;
     if (typeof approvalId !== "string") return;
     setApprovalBusy(true);
     try {
       const response = await fetch(
-        `${API_BASE}/sessions/${session.session_id}/approvals/${approvalId}`,
+        `${API_BASE}/sessions/${approvalSessionId}/approvals/${approvalId}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -876,12 +1207,15 @@ export default function AgentConsole() {
   }
 
   async function loadWorkspaceFiles(sessionId: string) {
-    if (refreshInFlight.current) return;
-    refreshInFlight.current = true;
+    if (workspaceRequestsInFlight.current.has(sessionId)) return;
+    workspaceRequestsInFlight.current.add(sessionId);
     try {
       const response = await fetch(`${API_BASE}/sessions/${sessionId}/files`);
       if (!response.ok) throw new Error(await responseError(response, "Could not list workspace files"));
       const files = (await response.json()) as WorkspaceEntry[];
+      const cacheKey = projectKey(workspaceRoots.current.get(sessionId)) || sessionId;
+      workspaceFilesCache.current.set(cacheKey, files);
+      if (activeSessionId.current !== sessionId) return;
       setWorkspaceFiles(files);
       const firstFile = files.find((entry) => entry.kind === "file");
       if (firstFile && !selectedFilePathRef.current) {
@@ -892,8 +1226,8 @@ export default function AgentConsole() {
         }, 0);
       }
     } finally {
-      refreshInFlight.current = false;
-      setWorkspacePhase("idle");
+      workspaceRequestsInFlight.current.delete(sessionId);
+      if (activeSessionId.current === sessionId) setWorkspacePhase("idle");
     }
   }
 
@@ -979,24 +1313,25 @@ export default function AgentConsole() {
   return <div className="console-shell">
     <header className="console-topbar">
       <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">Self-hosted runtime console</p></div></div>
-      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "Run in progress" : session ? "Session ready" : "Workspace required"}</div>
+      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "Run in progress" : session ? "Session ready" : "Project required"}</div>
     </header>
 
     <main className="console-layout" style={layoutStyle}>
-      {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Workspace panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show workspace" aria-label="Show workspace"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Workspace and run controls">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Workspace</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="Choose another workspace" aria-label="Change workspace" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide workspace panel" aria-label="Hide workspace panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
-        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading workspace...</> : <><FolderOpen size={16} />Choose folder</>}</button> : <div className="session-bar"><span title={session.workspace_root}>{workspaceRoot || session.workspace_root}</span></div>}
-        {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>No folder selected</strong><small>Choose a local folder to get started.</small></span></div>}
-        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>Scanning local workspace...</span></div>}
+      {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Project panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show project" aria-label="Show project"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Project and run controls">
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Project</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="Choose another project" aria-label="Change project" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide project panel" aria-label="Hide project panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
+        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading project...</> : <><FolderOpen size={16} />Choose project</>}</button> : <div className="session-bar"><span title={`Local path: ${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
+        {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>No project selected</strong><small>Choose a local project to get started.</small></span></div>}
+        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "Switching project..." : "Scanning project..."}</span></div>}
         {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} files · {workspaceFiles.filter((entry) => entry.kind === "directory").length} folders</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">Showing first 120 entries</div>}</div>}
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
+        {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>Empty workspace</strong><small>This folder has no visible files or folders.</small></span></div>}
         </>}</div>
-        <div className="rail-section history-section"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Recent tasks</span></button>{historyExpanded && <>{history.length === 0 ? <p className="history-empty">Completed tasks will appear here.</p> : <div className="history-list">{history.map((item) => <button className="history-item" key={`${item.timestamp}-${item.task}`} onClick={() => setTask(item.task)}><span>{item.task}</span><time>{new Date(item.timestamp).toLocaleDateString()}</time></button>)}</div>}</>}</div>
+         <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Conversations</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="Start a new conversation"><SquarePen size={14} /><span>New</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">Loading conversations...</p> : history.length === 0 ? <p className="history-empty">No conversations yet.</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `Local path: ${group.root}` : "Project path unavailable"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} {group.items.length === 1 ? "conversation" : "conversations"}</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`New conversation in ${group.name}`} aria-label={`New conversation in ${group.name}`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title_status === "pending" || item.title_status === "generating" ? "New conversation" : item.title ?? item.task ?? "New conversation"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} turns</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
       </aside>}
       <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"></div>
 
       <section className="trace-workbench" aria-label="Agent conversation">
-        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">Conversation</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{session ? runStatus : "workspace required"}</div></div></div><div className="context-budget-compact" title="Current context usage"><span>Context</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div>
+        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">Conversation</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{session ? runStatus : "workspace required"}</div></div></div><div className="workbench-heading-actions"><div className="context-budget-compact" title="Current context usage"><span>Context</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div></div>
 
         <div className="conversation-scroll" ref={conversationRef} aria-live="polite">
           {conversationTurns.map((turn) => {
@@ -1025,13 +1360,13 @@ export default function AgentConsole() {
                     <div className="thinking-steps">{turnActivitySteps.map((step) => { const presentation = activityPresentation(step); return <div className={`thinking-step tone-${eventTone(step.event.type)}`} key={step.events[0].event_id}><span className="thinking-step-icon">{step.event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(step.event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{presentation.title}</strong><time>{formatTime(step.event.timestamp)}</time></div><p>{presentation.description}</p><details className="thinking-payload"><summary>Execution details</summary><dl className="execution-details">{activityDetails(step).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details></div></div>; })}</div>
                   </details>}
                   {turnAnswer && <div className="answer-copy"><MarkdownAnswer content={turnAnswer} /><span className={`answer-cursor ${isLatestTurn && answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div>}
-                  {changeIds.length > 0 && <div className="changes-actions"><span><strong>Local changes</strong><small>Unified diff included above.</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />Changes reverted</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />Undo changes</button>)}</div>}
+                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>Local changes</strong><small>Unified diff included above.</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />Changes reverted</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />Undo changes</button>)}</div>}
                 </div>
               </article>}
             </div>;
           })}
           {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />Preparing activity</div>}
-        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a workspace first</h3><p>Select a real local folder to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading workspace...</> : <><FolderOpen size={14} />Choose folder</>}</button></div>}
+        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a project first</h3><p>Select a real local project to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading project...</> : <><FolderOpen size={14} />Choose project</>}</button></div>}
           {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>Ready when you are</h3><p>Send a task and follow the Agent from intent to local tools to final answer.</p></div>}
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
