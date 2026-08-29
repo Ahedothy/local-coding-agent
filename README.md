@@ -195,7 +195,9 @@ tool activity is grouped into a collapsible Thinking Process, and the final
 answer is progressively revealed as the run completes. The workspace,
 conversation, and file preview are independent panes; desktop users can resize
 or collapse the side panes, while the message composer remains docked at the
-bottom of the center pane.
+bottom of the center pane. A new session also offers starter actions for
+exploring a codebase, building a feature, reviewing code, or fixing a bug;
+clicking one fills an editable task prompt without starting a run automatically.
 
 On Windows, do not start the backend with `--reload`. The reload subprocess can
 select an asyncio event loop that does not support `create_subprocess_exec`,

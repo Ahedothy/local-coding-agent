@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from "react";
 import {
+  Bug,
   FolderCog,
+  FolderSearch,
   BrainCircuit,
   Bot,
   CheckCircle2,
@@ -14,9 +16,11 @@ import {
   FileWarning,
   FileCode2,
   FolderOpen,
+  Hammer,
   LoaderCircle,
   ListChecks,
   RotateCcw,
+  ScanSearch,
   Send,
   ShieldCheck,
   ShieldX,
@@ -76,25 +80,61 @@ function mergeAgentEvents(...groups: AgentEvent[][]): AgentEvent[] {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const eventLabels: Record<string, string> = {
-  session_started: "Session started",
-  user_message: "User message",
-  iteration_started: "Iteration started",
-  model_request: "Model request",
-  model_response: "Model response",
-  tool_started: "Tool started",
-  tool_finished: "Tool finished",
-  tool_failed: "Tool failed",
-  approval_requested: "Approval needed",
-  approval_resolved: "Approval resolved",
-  assistant_message: "Assistant message",
-  plan: "Plan",
-  reflection: "Reflection",
-  context_truncated: "Context truncated",
-  context_compacted: "Context compacted",
-  agent_finished: "Agent finished",
-  agent_error: "Agent error",
+  session_started: "会话已创建",
+  user_message: "用户消息",
+  iteration_started: "开始迭代",
+  model_request: "模型请求",
+  model_response: "模型响应",
+  tool_started: "开始执行工具",
+  tool_finished: "工具执行完成",
+  tool_failed: "工具执行失败",
+  approval_requested: "等待审批",
+  approval_resolved: "审批已处理",
+  assistant_message: "Agent 回复",
+  plan: "计划",
+  reflection: "复盘",
+  context_truncated: "上下文裁剪",
+  context_compacted: "上下文压缩",
+  agent_finished: "Agent 已完成",
+  agent_error: "Agent 出错",
 };
 const eventTypes = Object.keys(eventLabels);
+
+const starterActions = [
+  {
+    id: "explore",
+    title: "探索代码项目",
+    description: "了解项目结构、入口和测试方式。",
+    icon: FolderSearch,
+    prompt:
+      "请探索这个代码项目。检查项目结构、入口和测试方式，然后总结主要组件以及运行方法。不要修改文件。",
+  },
+  {
+    id: "build",
+    title: "构建新功能",
+    description: "规划并实现功能，同时补充测试。",
+    icon: Hammer,
+    prompt:
+      "请先检查这个项目，然后实现所需功能。先给出简短计划，再完成必要修改并运行相关测试。",
+  },
+  {
+    id: "review",
+    title: "审查代码",
+    description: "发现正确性、可靠性和可维护性问题。",
+    icon: ScanSearch,
+    prompt:
+      "请审查这个代码项目的正确性、可靠性、安全性和可维护性。检查相关文件和测试，然后使用文件路径报告问题并给出具体建议。不要修改文件。",
+  },
+  {
+    id: "fix",
+    title: "修复问题",
+    description: "复现失败，进行最小修改并验证结果。",
+    icon: Bug,
+    prompt:
+      "请找出并修复这个项目当前失败的测试或 Bug。先检查相关代码，进行最小修改，然后运行完整的相关测试套件进行验证。",
+  },
+] as const;
+
 function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
   if (type === "approval_requested") return "working";
@@ -132,7 +172,7 @@ function normalizeProjectPath(workspaceRoot?: string | null) {
 
 function projectName(workspaceRoot?: string | null) {
   const normalized = normalizeProjectPath(workspaceRoot);
-  return normalized.split("/").at(-1) || "Project";
+  return normalized.split("/").at(-1) || "项目";
 }
 
 function projectKey(workspaceRoot?: string | null) {
@@ -144,7 +184,19 @@ function formatDuration(events: AgentEvent[]) {
   const start = new Date(events[0].timestamp).getTime();
   const end = new Date(events.at(-1)?.timestamp ?? events[0].timestamp).getTime();
   const seconds = Math.max(0, (end - start) / 1000);
-  return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  return seconds < 60 ? `${seconds.toFixed(1)} 秒` : `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`;
+}
+
+function runStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    "workspace-required": "需要工作区",
+    running: "执行中",
+    ready: "就绪",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return labels[status] ?? `状态：${status}`;
 }
 
 function readPayloadString(event: AgentEvent, key: string) {
@@ -154,19 +206,19 @@ function readPayloadString(event: AgentEvent, key: string) {
 
 function toolDisplayName(toolName: unknown) {
   const names: Record<string, string> = {
-    list_files: "Inspect workspace",
-    read_file: "Read file",
-    write_file: "Create or update file",
-    replace_in_file: "Update file",
-    apply_patch: "Apply code changes",
-    execute_command: "Run local command",
-    search_files: "Search workspace",
-    get_file_info: "Inspect file",
-    list_directory_tree: "Inspect workspace tree",
-    git_diff: "Review workspace changes",
+    list_files: "查看工作区",
+    read_file: "读取文件",
+    write_file: "创建或更新文件",
+    replace_in_file: "更新文件",
+    apply_patch: "应用代码修改",
+    execute_command: "运行本地命令",
+    search_files: "搜索工作区",
+    get_file_info: "查看文件信息",
+    list_directory_tree: "查看工作区树",
+    git_diff: "查看工作区修改",
   };
-  const rawName = typeof toolName === "string" && toolName ? toolName : "local tool";
-  return names[rawName] ?? rawName.replaceAll("_", " ");
+  const rawName = typeof toolName === "string" && toolName ? toolName : "本地工具";
+  return names[rawName] ?? `未知工具（${rawName.replaceAll("_", " ")}）`;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -182,60 +234,60 @@ function activityPresentation(step: ActivityStep) {
   const event = step.event;
   const output = activityOutput(step);
   const toolName = toolDisplayName(event.payload.tool_name);
-  if (event.type === "iteration_started") return { title: `Step ${event.iteration ?? ""}`.trim(), description: "Choosing the next action for this task." };
-  if (event.type === "model_request") return { title: "Analyzing the task", description: "Preparing the next action." };
+  if (event.type === "iteration_started") return { title: `第 ${event.iteration ?? ""} 步`.trim(), description: "正在选择下一步操作。" };
+  if (event.type === "model_request") return { title: "分析任务", description: "正在准备下一步操作。" };
   if (event.type === "model_response") {
     const toolCallCount = Number(event.payload.tool_call_count ?? 0);
     return toolCallCount > 0
-      ? { title: "Action selected", description: `${toolCallCount} local action${toolCallCount === 1 ? "" : "s"} queued.` }
-      : { title: "Preparing the response", description: "The task is ready for a final answer." };
+      ? { title: "已选择操作", description: `已排队 ${toolCallCount} 个本地操作。` }
+      : { title: "准备回复", description: "任务处理完成，正在准备最终回复。" };
   }
-  if (event.type === "plan") return { title: "Plan", description: readPayloadString(event, "content") ?? "Organizing the work into steps." };
-  if (event.type === "reflection") return { title: "Checking the result", description: readPayloadString(event, "content") ?? "Reviewing the latest result." };
+  if (event.type === "plan") return { title: "计划", description: readPayloadString(event, "content") ?? "正在把工作组织成多个步骤。" };
+  if (event.type === "reflection") return { title: "检查结果", description: readPayloadString(event, "content") ?? "正在检查最新执行结果。" };
   if (event.type === "tool_started" || event.type === "tool_finished") {
-    if (toolName === "Run local command" && typeof output?.command === "string") return { title: toolName, description: output.command };
+    if (event.payload.tool_name === "execute_command" && typeof output?.command === "string") return { title: toolName, description: output.command };
     if (typeof output?.path === "string") return { title: toolName, description: output.path };
-    if (Array.isArray(output?.touched_files)) return { title: toolName, description: `${output.touched_files.length} file${output.touched_files.length === 1 ? "" : "s"} updated locally.` };
-    return { title: event.type === "tool_started" ? toolName : `${toolName} complete`, description: event.type === "tool_started" ? "Working in your local workspace." : "Local operation completed successfully." };
+    if (Array.isArray(output?.touched_files)) return { title: toolName, description: `已在本地更新 ${output.touched_files.length} 个文件。` };
+    return { title: event.type === "tool_started" ? toolName : `${toolName}已完成`, description: event.type === "tool_started" ? "正在你的本地工作区中执行。" : "本地操作已成功完成。" };
   }
   if (event.type === "tool_failed") {
-    const error = readPayloadString(event, "error") ?? "The local operation could not be completed.";
+    const error = readPayloadString(event, "error") ?? "本地操作未能完成。";
     return error.includes("replacement count mismatch")
-      ? { title: "Update needs a fresh match", description: "The target text was not found exactly. The Agent should reread the file before trying again." }
+      ? { title: "更新需要重新匹配", description: "没有精确找到目标文本。Agent 应先重新读取文件，再重试。" }
       : error.includes("unified diff contains no hunks")
-        ? { title: "Patch has no changes", description: "The Agent provided file headers without an actual @@ change block. It should reread the file and use replace_in_file for a simple edit or regenerate a complete patch." }
+        ? { title: "补丁没有实际修改", description: "Agent 只提供了文件头，没有真正的 @@ 修改块。应重新读取文件，使用 replace_in_file 完成简单编辑，或重新生成完整补丁。" }
       : error.includes("hunk line count mismatch")
-        ? { title: "Patch line counts need fixing", description: "The @@ header counts do not match the hunk lines. Old count = context + removed lines; new count = context + added lines. The Agent should regenerate the hunk instead of resending it." }
+        ? { title: "补丁行数需要修正", description: "@@ 头部的行数与修改块不匹配。旧行数=上下文行+删除行，新行数=上下文行+新增行。Agent 应重新生成修改块。" }
       : error.includes("invalid unified diff")
-        ? { title: "Patch needs regeneration", description: "The patch format was invalid. The Agent should reread the file and create a fresh patch." }
-        : { title: `${toolName} needs attention`, description: error };
+        ? { title: "需要重新生成补丁", description: "补丁格式无效。Agent 应重新读取文件并生成新的补丁。" }
+        : { title: `${toolName}需要处理`, description: error };
   }
   if (event.type === "approval_requested") {
     if (event.payload.automatic === true && event.payload.approval_scope === "session") {
-      return { title: "Auto-approved", description: "Session auto-approval is enabled for this operation." };
+      return { title: "已自动批准", description: "当前操作已启用会话级自动批准。" };
     }
     return event.payload.automatic === true
-      ? { title: "Auto-approved", description: "This operation is covered by approval for the current message." }
-      : { title: "Approval needed", description: "Waiting for your approval before a local change or command." };
+      ? { title: "已自动批准", description: "当前操作已被本条消息的审批范围覆盖。" }
+      : { title: "需要审批", description: "本地修改或命令执行前正在等待你的批准。" };
   }
   if (event.type === "approval_resolved") {
     const decision = readPayloadString(event, "decision");
     if (decision === "approved" && event.payload.automatic === true) {
       return event.payload.approval_scope === "session"
-        ? { title: "Auto-approved", description: "Approved automatically while session auto-approval is enabled." }
-        : { title: "Auto-approved", description: "Approved automatically for this message." };
+        ? { title: "已自动批准", description: "会话级自动批准已启用，操作已自动放行。" }
+        : { title: "已自动批准", description: "操作已针对本条消息自动放行。" };
     }
     if (decision === "approved" && event.payload.approval_scope === "current_turn") {
-      return { title: "Approved for this message", description: "This approval covers the remaining local operations in the current message." };
+      return { title: "已批准本条消息", description: "本次审批覆盖当前消息剩余的本地操作。" };
     }
     return decision === "approved"
-      ? { title: "Approval granted", description: "The local operation is allowed to continue." }
-      : { title: "Approval declined", description: "The local operation was blocked by your decision." };
+      ? { title: "审批通过", description: "本地操作可以继续执行。" }
+      : { title: "审批拒绝", description: "本地操作已被你的决定拦截。" };
   }
-  if (event.type === "context_truncated") return { title: "Context trimmed", description: "Keeping the most relevant conversation details." };
-  if (event.type === "context_compacted") return { title: "Memory compressed", description: "Conversation context was condensed to stay within the model budget." };
-  if (event.type === "agent_error") return { title: "Run stopped", description: readPayloadString(event, "error") ?? "The Agent could not finish this task." };
-  return { title: eventLabels[event.type] ?? "Agent activity", description: "Agent state updated." };
+  if (event.type === "context_truncated") return { title: "上下文已裁剪", description: "保留最相关的对话信息。" };
+  if (event.type === "context_compacted") return { title: "记忆已压缩", description: "已压缩对话上下文，以控制模型输入预算。" };
+  if (event.type === "agent_error") return { title: "执行已停止", description: readPayloadString(event, "error") ?? "Agent 未能完成此任务。" };
+  return { title: eventLabels[event.type] ?? "Agent 活动", description: "Agent 状态已更新。" };
 }
 
 function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
@@ -315,27 +367,27 @@ function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
 function activityDetails(step: ActivityStep) {
   const event = step.event;
   const output = activityOutput(step);
-  const details: Array<[string, string]> = [["Status", event.type === "tool_failed" || event.type === "agent_error" ? "Needs attention" : event.type === "approval_resolved" ? (readPayloadString(event, "decision") === "approved" ? "Approved" : "Declined") : ["tool_finished", "agent_finished"].includes(event.type) ? "Completed" : "In progress"]];
-  if (typeof event.payload.tool_name === "string") details.push(["Tool", event.payload.tool_name]);
-  if (event.iteration !== null) details.push(["Iteration", String(event.iteration)]);
-  if (typeof output?.path === "string") details.push(["Path", output.path]);
-  if (typeof output?.command === "string") details.push(["Command", output.command]);
-  if (typeof output?.process_id === "string") details.push(["Process", output.process_id]);
-  if (typeof output?.status === "string") details.push(["Process status", output.status]);
+  const details: Array<[string, string]> = [["状态", event.type === "tool_failed" || event.type === "agent_error" ? "需要处理" : event.type === "approval_resolved" ? (readPayloadString(event, "decision") === "approved" ? "已批准" : "已拒绝") : ["tool_finished", "agent_finished"].includes(event.type) ? "已完成" : "进行中"]];
+  if (typeof event.payload.tool_name === "string") details.push(["工具", toolDisplayName(event.payload.tool_name)]);
+  if (event.iteration !== null) details.push(["迭代", String(event.iteration)]);
+  if (typeof output?.path === "string") details.push(["路径", output.path]);
+  if (typeof output?.command === "string") details.push(["命令", output.command]);
+  if (typeof output?.process_id === "string") details.push(["进程", output.process_id]);
+  if (typeof output?.status === "string") details.push(["进程状态", output.status]);
   if (typeof output?.pid === "number") details.push(["PID", String(output.pid)]);
-  if (typeof output?.operation === "string" && output.operation !== "status") details.push(["Operation", output.operation]);
-  if (Array.isArray(output?.touched_files)) details.push(["Files updated", String(output.touched_files.length)]);
-  if (typeof output?.duration_seconds === "number") details.push(["Duration", `${output.duration_seconds.toFixed(2)}s`]);
-  if (typeof event.payload.tool_call_count === "number") details.push(["Tool calls", String(event.payload.tool_call_count)]);
-  if (typeof event.payload.message_count === "number") details.push(["Messages", String(event.payload.message_count)]);
+  if (typeof output?.operation === "string" && output.operation !== "status") details.push(["操作", output.operation]);
+  if (Array.isArray(output?.touched_files)) details.push(["更新文件数", String(output.touched_files.length)]);
+  if (typeof output?.duration_seconds === "number") details.push(["耗时", `${output.duration_seconds.toFixed(2)} 秒`]);
+  if (typeof event.payload.tool_call_count === "number") details.push(["工具调用数", String(event.payload.tool_call_count)]);
+  if (typeof event.payload.message_count === "number") details.push(["消息数", String(event.payload.message_count)]);
   const approvalDetailsValue = objectValue(event.payload.details);
   if (event.type === "approval_requested" && approvalDetailsValue) {
-    if (typeof approvalDetailsValue.command === "string") details.push(["Command", approvalDetailsValue.command]);
-    if (Array.isArray(approvalDetailsValue.command)) details.push(["Command", approvalDetailsValue.command.join(" ")]);
-    if (typeof approvalDetailsValue.path === "string") details.push(["Path", approvalDetailsValue.path]);
+    if (typeof approvalDetailsValue.command === "string") details.push(["命令", approvalDetailsValue.command]);
+    if (Array.isArray(approvalDetailsValue.command)) details.push(["命令", approvalDetailsValue.command.join(" ")]);
+    if (typeof approvalDetailsValue.path === "string") details.push(["路径", approvalDetailsValue.path]);
   }
   const error = readPayloadString(event, "error");
-  if (error) details.push(["Error", error]);
+  if (error) details.push(["错误", error]);
   return details;
 }
 
@@ -478,12 +530,12 @@ function CodePreview({ preview }: { preview: FilePreview }): ReactElement {
   const lines = preview.content.split(/\r?\n/);
   if (language === "Markdown") {
     return <div className="file-preview-content file-preview-markdown">
-      <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} lines{preview.truncated ? " · truncated" : ""}</span></div>
+      <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} 行{preview.truncated ? " · 已截断" : ""}</span></div>
       <div className="markdown-preview-frame"><MarkdownAnswer content={preview.content} /></div>
     </div>;
   }
   return <div className="file-preview-content">
-    <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} lines{preview.truncated ? " · truncated" : ""}</span></div>
+    <div className="preview-toolbar"><span className="preview-language">{language}</span><span>{lines.length} 行{preview.truncated ? " · 已截断" : ""}</span></div>
     <div className="markdown-preview-frame file-preview-code-frame"><pre className="markdown-code-block"><code>{renderHighlightedCodeLines(lines, language, "file-preview")}</code></pre></div>
   </div>;
 }
@@ -664,13 +716,13 @@ function ApprovalCard({
   const preview = patch ?? contentPreview ?? (oldText !== undefined || newText !== undefined
     ? `- ${oldText ?? ""}\n+ ${newText ?? ""}`
     : undefined);
-  return <section className="approval-card" aria-label="Approval required">
-    <div className="approval-card-heading"><span className="approval-card-icon"><ShieldCheck size={17} /></span><div><strong>Approval required</strong><p>{readPayloadString(approval, "summary") ?? "The Agent wants to perform a local operation."}</p></div></div>
-    {command && <div className="approval-field"><span>Command</span><code>{command}</code></div>}
-    {typeof details?.cwd === "string" && <div className="approval-field"><span>Working folder</span><code>{details.cwd}</code></div>}
-    {typeof details?.path === "string" && <div className="approval-field"><span>File</span><code>{details.path}</code></div>}
+  return <section className="approval-card" aria-label="需要审批">
+    <div className="approval-card-heading"><span className="approval-card-icon"><ShieldCheck size={17} /></span><div><strong>需要审批</strong><p>{readPayloadString(approval, "summary") ?? "Agent 希望执行一项本地操作。"}</p></div></div>
+    {command && <div className="approval-field"><span>命令</span><code>{command}</code></div>}
+    {typeof details?.cwd === "string" && <div className="approval-field"><span>工作目录</span><code>{details.cwd}</code></div>}
+    {typeof details?.path === "string" && <div className="approval-field"><span>文件</span><code>{details.path}</code></div>}
     {preview && <pre className="approval-preview">{preview}</pre>}
-    <div className="approval-actions"><button className="approval-button approval-button-reject" onClick={() => onDecide(false)} disabled={busy}><ShieldX size={15} />Reject</button><button className="approval-button approval-button-approve-once" onClick={() => onDecide(true)} disabled={busy}><ShieldCheck size={15} />Approve once</button><button className="approval-button approval-button-approve-turn" onClick={() => onDecide(true, true)} disabled={busy} title="Approve this operation and automatically approve later local operations from the current message"><ListChecks size={15} />Auto-approve this message</button></div>
+    <div className="approval-actions"><button className="approval-button approval-button-reject" onClick={() => onDecide(false)} disabled={busy}><ShieldX size={15} />拒绝</button><button className="approval-button approval-button-approve-once" onClick={() => onDecide(true)} disabled={busy}><ShieldCheck size={15} />仅批准一次</button><button className="approval-button approval-button-approve-turn" onClick={() => onDecide(true, true)} disabled={busy} title="批准当前操作，并自动批准本条消息后续的本地操作"><ListChecks size={15} />自动批准本条消息</button></div>
   </section>;
 }
 
@@ -721,6 +773,7 @@ export default function AgentConsole() {
   const selectedFilePathRef = useRef<string | null>(null);
   const previewRequestIdRef = useRef(0);
   const conversationRef = useRef<HTMLDivElement | null>(null);
+  const taskInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => () => {
     activeStreamRunId.current = null;
@@ -825,7 +878,7 @@ export default function AgentConsole() {
     if (showLoading) setHistoryLoading(true);
     try {
       const response = await fetch(`${API_BASE}/history?limit=50`);
-      if (!response.ok) throw new Error(await responseError(response, "Could not load run history"));
+      if (!response.ok) throw new Error(await responseError(response, "无法加载运行历史"));
       const loaded = (await response.json()) as HistoryItem[];
       setHistory((current) => {
         const loadedSessionIds = new Set(loaded.map((item) => item.session_id));
@@ -835,7 +888,7 @@ export default function AgentConsole() {
         return [...loaded, ...stillRunning].slice(0, 50);
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load run history");
+      setError(reason instanceof Error ? reason.message : "无法加载运行历史");
     } finally {
       historyRequestInFlight.current = false;
       if (showLoading) setHistoryLoading(false);
@@ -890,12 +943,12 @@ export default function AgentConsole() {
       }
       if (isCurrentWorkspace && ["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
         void loadWorkspaceFiles(started.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "Could not refresh workspace");
+          setError(reason instanceof Error ? reason.message : "无法刷新工作区");
         });
       }
       if (isCurrentWorkspace && event.type === "tool_finished" && selectedFilePathRef.current) {
         void selectFile(selectedFilePathRef.current, started.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "Could not refresh file preview");
+          setError(reason instanceof Error ? reason.message : "无法刷新文件预览");
         });
       }
       if (event.type === "agent_finished" || event.type === "agent_error") {
@@ -916,7 +969,7 @@ export default function AgentConsole() {
       setPendingApproval(null);
       setApprovalBusy(false);
       void loadHistory();
-      setError("The event stream closed unexpectedly.");
+      setError("事件流意外关闭。");
     };
   }
 
@@ -931,7 +984,7 @@ export default function AgentConsole() {
     try {
       if (switchingProject) setWorkspacePhase("loading");
       const activationResponse = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}/activate`, { method: "POST" });
-      if (!activationResponse.ok) throw new Error(await responseError(activationResponse, "Could not activate this conversation"));
+      if (!activationResponse.ok) throw new Error(await responseError(activationResponse, "无法激活此会话"));
       const activated = (await activationResponse.json()) as SessionResponse;
       const cachedEvents = conversationEventsCache.current.get(sessionId) ?? [];
       const liveRunId = activated.run_id ?? _runId;
@@ -960,7 +1013,7 @@ export default function AgentConsole() {
         setPreviewMessage("");
         setWorkspacePhase(cachedFiles ? "idle" : "loading");
         void loadWorkspaceFiles(activated.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "Could not load workspace files");
+          setError(reason instanceof Error ? reason.message : "无法加载工作区文件");
         }).finally(() => setProjectSwitching(false));
       } else {
         setProjectSwitching(false);
@@ -970,7 +1023,7 @@ export default function AgentConsole() {
 
       void (async () => {
         const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}`);
-        if (!response.ok) throw new Error(await responseError(response, "Could not load this conversation"));
+        if (!response.ok) throw new Error(await responseError(response, "无法加载此会话"));
         const record = (await response.json()) as HistoryRecord;
         conversationEventsCache.current.set(sessionId, mergeAgentEvents(cachedEvents, record.events));
         setEvents((current) => mergeAgentEvents(current, record.events));
@@ -979,11 +1032,11 @@ export default function AgentConsole() {
           setInstantAnswerTurnKey(buildConversationTurns(record.events).at(-1)?.key ?? null);
         }
       })().catch((reason) => {
-        setError(reason instanceof Error ? reason.message : "Could not load this conversation");
+        setError(reason instanceof Error ? reason.message : "无法加载此会话");
       });
     } catch (reason) {
       setWorkspacePhase("idle");
-      setError(reason instanceof Error ? reason.message : "Could not load this run");
+      setError(reason instanceof Error ? reason.message : "无法加载此次运行");
       setProjectSwitching(false);
     }
   }
@@ -1039,7 +1092,7 @@ export default function AgentConsole() {
     setRevertedChanges(new Set());
     try {
       const response = await fetch(`${API_BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace_root: root }) });
-      if (!response.ok) throw new Error(await responseError(response, "Could not create session"));
+      if (!response.ok) throw new Error(await responseError(response, "无法创建会话"));
       const created = (await response.json()) as SessionResponse;
       activeSessionId.current = created.session_id;
       workspaceRoots.current.set(created.session_id, created.workspace_root);
@@ -1052,11 +1105,11 @@ export default function AgentConsole() {
       setWorkspaceFiles(cachedFiles ?? []);
       setWorkspacePhase(cachedFiles ? "idle" : "loading");
       void loadWorkspaceFiles(created.session_id).catch((reason) => {
-        setError(reason instanceof Error ? reason.message : "Could not load workspace files");
+        setError(reason instanceof Error ? reason.message : "无法加载工作区文件");
       });
     } catch (reason) {
       setWorkspacePhase("idle");
-      setError(reason instanceof Error ? reason.message : "Could not create session");
+      setError(reason instanceof Error ? reason.message : "无法创建会话");
     }
   }
 
@@ -1076,7 +1129,7 @@ export default function AgentConsole() {
     activeStreamRunId.current = null;
     try {
       const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask, auto_approve: autoApprovalEnabled }) });
-      if (!response.ok) throw new Error(await responseError(response, "Could not start run"));
+      if (!response.ok) throw new Error(await responseError(response, "无法启动运行"));
       const started = (await response.json()) as RunResponse;
       setTask("");
       setRun(started);
@@ -1103,7 +1156,7 @@ export default function AgentConsole() {
           session_id: started.session_id,
           workspace_root: session.workspace_root,
           task: existing?.task ?? submittedTask,
-          title: existing?.title ?? "New conversation",
+          title: existing?.title ?? "新会话",
           status: "running",
           started_at: existing?.started_at ?? new Date().toISOString(),
           turn_count: (existing?.turn_count ?? 0) + 1,
@@ -1114,8 +1167,13 @@ export default function AgentConsole() {
       subscribeToRun(started, [optimisticUserEvent]);
     } catch (reason) {
       setBusy(false);
-      setError(reason instanceof Error ? reason.message : "Could not start run");
+      setError(reason instanceof Error ? reason.message : "无法启动运行");
     }
+  }
+
+  function chooseStarterPrompt(prompt: string) {
+    setTask(prompt);
+    requestAnimationFrame(() => taskInputRef.current?.focus());
   }
 
   async function cancelRun() {
@@ -1123,7 +1181,7 @@ export default function AgentConsole() {
     try {
       await fetch(`${API_BASE}/runs/${run.run_id}/cancel`, { method: "POST" });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not cancel run");
+      setError(reason instanceof Error ? reason.message : "无法取消运行");
     }
   }
 
@@ -1143,10 +1201,10 @@ export default function AgentConsole() {
           body: JSON.stringify({ approved, approve_current_turn: approveCurrentTurn }),
         },
       );
-      if (!response.ok) throw new Error(await responseError(response, "Could not resolve approval"));
+       if (!response.ok) throw new Error(await responseError(response, "无法处理审批"));
     } catch (reason) {
       setApprovalBusy(false);
-      setError(reason instanceof Error ? reason.message : "Could not resolve approval");
+      setError(reason instanceof Error ? reason.message : "无法处理审批");
     }
   }
 
@@ -1157,14 +1215,14 @@ export default function AgentConsole() {
         `${API_BASE}/sessions/${session.session_id}/changes/${changeId}/revert`,
         { method: "POST" },
       );
-      if (!response.ok) throw new Error(await responseError(response, "Could not undo changes"));
+       if (!response.ok) throw new Error(await responseError(response, "无法撤销修改"));
       setRevertedChanges((current) => new Set(current).add(changeId));
       await loadWorkspaceFiles(session.session_id);
       if (selectedFilePathRef.current) {
         await selectFile(selectedFilePathRef.current, session.session_id);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not undo changes");
+      setError(reason instanceof Error ? reason.message : "无法撤销修改");
     }
   }
 
@@ -1175,7 +1233,7 @@ export default function AgentConsole() {
     try {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       const response = await fetch(`${API_BASE}/workspaces/select`);
-      if (!response.ok) throw new Error(await responseError(response, "Could not choose workspace"));
+       if (!response.ok) throw new Error(await responseError(response, "无法选择工作区"));
       const selection = (await response.json()) as { workspace_root: string };
       setWorkspaceFiles([]);
       setSelectedFilePath(null);
@@ -1188,7 +1246,7 @@ export default function AgentConsole() {
       setWorkspaceRoot(selection.workspace_root);
       await createSession(selection.workspace_root);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not choose workspace");
+      setError(reason instanceof Error ? reason.message : "无法选择工作区");
       setWorkspacePhase("idle");
     }
   }
@@ -1198,7 +1256,7 @@ export default function AgentConsole() {
     workspaceRequestsInFlight.current.add(sessionId);
     try {
       const response = await fetch(`${API_BASE}/sessions/${sessionId}/files`);
-      if (!response.ok) throw new Error(await responseError(response, "Could not list workspace files"));
+      if (!response.ok) throw new Error(await responseError(response, "无法列出工作区文件"));
       const files = (await response.json()) as WorkspaceEntry[];
       const cacheKey = projectKey(workspaceRoots.current.get(sessionId)) || sessionId;
       workspaceFilesCache.current.set(cacheKey, files);
@@ -1208,7 +1266,7 @@ export default function AgentConsole() {
       if (firstFile && !selectedFilePathRef.current) {
         window.setTimeout(() => {
           void selectFile(firstFile.path, sessionId).catch((reason) => {
-            setError(reason instanceof Error ? reason.message : "Could not preview file");
+            setError(reason instanceof Error ? reason.message : "无法预览文件");
           });
         }, 0);
       }
@@ -1229,11 +1287,11 @@ export default function AgentConsole() {
     try {
       const response = await fetch(`${API_BASE}/sessions/${sessionId}/files/${path.split("/").map(encodeURIComponent).join("/")}`);
       if (!response.ok) {
-        const message = await responseError(response, "Could not preview file");
+        const message = await responseError(response, "无法预览文件");
         if (requestId !== previewRequestIdRef.current) return;
         const unsupported = response.status === 415 || /binary|UTF-8|text file|not supported/i.test(message);
         setPreviewState(unsupported ? "unsupported" : "error");
-        setPreviewMessage(unsupported ? "This file is not a supported UTF-8 text file." : message);
+        setPreviewMessage(unsupported ? "此文件不是受支持的 UTF-8 文本文件。" : message);
         return;
       }
       const preview = (await response.json()) as FilePreview;
@@ -1243,7 +1301,7 @@ export default function AgentConsole() {
     } catch (reason) {
       if (requestId !== previewRequestIdRef.current) return;
       setPreviewState("error");
-      setPreviewMessage(reason instanceof Error ? reason.message : "Could not preview file");
+      setPreviewMessage(reason instanceof Error ? reason.message : "无法预览文件");
     }
   }
 
@@ -1287,7 +1345,7 @@ export default function AgentConsole() {
   useEffect(() => {
     if (!session || !busy) return;
     const timer = window.setInterval(() => {
-      void loadWorkspaceFiles(session.session_id).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not refresh workspace"));
+      void loadWorkspaceFiles(session.session_id).catch((reason) => setError(reason instanceof Error ? reason.message : "无法刷新工作区"));
     }, 700);
     return () => window.clearInterval(timer);
   }, [busy, session]);
@@ -1299,26 +1357,26 @@ export default function AgentConsole() {
 
   return <div className="console-shell">
     <header className="console-topbar">
-      <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">Self-hosted runtime console</p></div></div>
-      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "Run in progress" : session ? "Session ready" : "Project required"}</div>
+      <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">自托管运行时控制台</p></div></div>
+      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "执行中" : session ? "会话就绪" : "需要选择项目"}</div>
     </header>
 
     <main className="console-layout" style={layoutStyle}>
-      {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="Project panel collapsed"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="Show project" aria-label="Show project"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="Project and run controls">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Project</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="Choose another project" aria-label="Change project" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="Hide project panel" aria-label="Hide project panel"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
-        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />Loading project...</> : <><FolderOpen size={16} />Choose project</>}</button> : <div className="session-bar"><span title={`Local path: ${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
-        {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>No project selected</strong><small>Choose a local project to get started.</small></span></div>}
-        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "Switching project..." : "Scanning project..."}</span></div>}
-        {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} files · {workspaceFiles.filter((entry) => entry.kind === "directory").length} folders</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">Showing first 120 entries</div>}</div>}
+      {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="项目面板已折叠"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="显示项目" aria-label="显示项目"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="项目和运行控制">
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">项目</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="选择其他项目" aria-label="切换项目" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="隐藏项目面板" aria-label="隐藏项目面板"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
+        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />正在选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />正在加载项目…</> : <><FolderOpen size={16} />选择项目</>}</button> : <div className="session-bar"><span title={`本地路径：${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
+        {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>尚未选择项目</strong><small>选择一个本地项目开始使用。</small></span></div>}
+        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "正在切换项目…" : "正在扫描项目…"}</span></div>}
+        {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} 个文件 · {workspaceFiles.filter((entry) => entry.kind === "directory").length} 个文件夹</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">仅显示前 120 项</div>}</div>}
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
-        {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>Empty workspace</strong><small>This folder has no visible files or folders.</small></span></div>}
+        {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>工作区为空</strong><small>此文件夹中没有可见的文件或文件夹。</small></span></div>}
         </>}</div>
-        <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">Conversations</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="Start a new conversation"><SquarePen size={14} /><span>New</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">Loading conversations...</p> : history.length === 0 ? <p className="history-empty">No conversations yet.</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `Local path: ${group.root}` : "Project path unavailable"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} {group.items.length === 1 ? "conversation" : "conversations"}</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`New conversation in ${group.name}`} aria-label={`New conversation in ${group.name}`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "New conversation"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} turns</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
+        <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">会话</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="开始新会话"><SquarePen size={14} /><span>新建</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">正在加载会话…</p> : history.length === 0 ? <p className="history-empty">暂无会话。</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `本地路径：${group.root}` : "项目路径不可用"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} 个会话</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "新会话"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} 轮</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
         </aside>}
-      <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="Resize workspace panel"></div>
+      <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="调整工作区面板宽度"></div>
 
-      <section className="trace-workbench" aria-label="Agent conversation">
-        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">Conversation</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{session ? runStatus : "workspace required"}</div></div></div><div className="workbench-heading-actions"><div className="context-budget-compact" title="Current context usage"><span>Context</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div></div>
+      <section className="trace-workbench" aria-label="Agent 对话">
+        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">对话</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{runStatusLabel(runStatus)}</div></div></div><div className="workbench-heading-actions"><div className="context-budget-compact" title="当前上下文使用情况"><span>上下文</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div></div>
 
         <div className="conversation-scroll" ref={conversationRef} aria-live="polite">
           {conversationTurns.map((turn) => {
@@ -1336,33 +1394,33 @@ export default function AgentConsole() {
             const approvalIsPending = Boolean(turnApproval && pendingApproval && approvalId === pendingApproval.payload.approval_id);
             const changeIds = [...new Set(changeIdsForEvents(turn.events))];
             return <div className="conversation-turn" key={turn.key}>
-              <article className="chat-message user-message"><div className="message-avatar user-avatar"><UserRound size={16} /></div><div className="message-body"><div className="message-meta"><strong>You</strong><time>{formatTime(turn.userEvent.timestamp)}</time></div><p>{readPayloadString(turn.userEvent, "content")}</p></div></article>
+              <article className="chat-message user-message"><div className="message-avatar user-avatar"><UserRound size={16} /></div><div className="message-body"><div className="message-meta"><strong>你</strong><time>{formatTime(turn.userEvent.timestamp)}</time></div><p>{readPayloadString(turn.userEvent, "content")}</p></div></article>
               {(turnActivitySteps.length > 0 || turnAnswer) && <article className="chat-message agent-message">
                 <div className="message-avatar agent-avatar"><Bot size={16} /></div>
                 <div className="message-body">
-                  <div className="message-meta"><strong>Agent</strong><time>{turnBusy ? "working" : turnFinalAnswer ? "final answer" : "activity"}</time><span className="message-stats"><span><Clock3 size={11} />{stats.duration}</span><span>{stats.iterations || 0} {stats.iterations === 1 ? "step" : "steps"}</span><span>{stats.tools || 0} {stats.tools === 1 ? "tool" : "tools"}</span>{stats.failures > 0 && <span className="message-stats-danger">{stats.failures} failed</span>}</span></div>
+                  <div className="message-meta"><strong>Agent</strong><time>{turnBusy ? "执行中" : turnFinalAnswer ? "最终回复" : "活动"}</time><span className="message-stats"><span><Clock3 size={11} />{stats.duration}</span><span>{stats.iterations || 0} 步</span><span>{stats.tools || 0} 个工具</span>{stats.failures > 0 && <span className="message-stats-danger">{stats.failures} 次失败</span>}</span></div>
                   {approvalIsPending && pendingApproval && <ApprovalCard approval={pendingApproval} busy={approvalBusy} onDecide={(approved, approveCurrentTurn) => void decideApproval(approved, approveCurrentTurn)} />}
                   {turnActivitySteps.length > 0 && <details className="thinking-inline" open={isLatestTurn ? thinkingExpanded : expandedActivityTurns.has(turn.key)} onToggle={(event) => { const open = event.currentTarget.open; if (isLatestTurn) setThinkingExpanded(open); else setExpandedActivityTurns((current) => { const next = new Set(current); if (open) next.add(turn.key); else next.delete(turn.key); return next; }); }}>
-                    <summary><span className="thinking-summary-main"><span className="thinking-avatar"><BrainCircuit size={16} /></span><span><strong>{turnBusy ? "Agent activity" : "Agent activity complete"}</strong><small>{turnBusy ? (turnActiveTool ? `Using ${toolDisplayName(turnActiveTool)}` : "Following the task") : `${turnActivitySteps.length} activity ${turnActivitySteps.length === 1 ? "step" : "steps"}`}</small></span></span><span className="thinking-summary-state">{turnBusy ? <LoaderCircle className="spin" size={15} /> : hasAgentError ? <XCircle size={15} /> : <CheckCircle2 size={15} />}</span></summary>
-                    <div className="thinking-steps">{turnActivitySteps.map((step) => { const presentation = activityPresentation(step); return <div className={`thinking-step tone-${eventTone(step.event.type)}`} key={step.events[0].event_id}><span className="thinking-step-icon">{step.event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(step.event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{presentation.title}</strong><time>{formatTime(step.event.timestamp)}</time></div><p>{presentation.description}</p><details className="thinking-payload"><summary>Execution details</summary><dl className="execution-details">{activityDetails(step).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details></div></div>; })}</div>
+                    <summary><span className="thinking-summary-main"><span className="thinking-avatar"><BrainCircuit size={16} /></span><span><strong>{turnBusy ? "Agent 活动" : "Agent 活动已完成"}</strong><small>{turnBusy ? (turnActiveTool ? `正在${toolDisplayName(turnActiveTool)}` : "正在处理任务") : `${turnActivitySteps.length} 个活动步骤`}</small></span></span><span className="thinking-summary-state">{turnBusy ? <LoaderCircle className="spin" size={15} /> : hasAgentError ? <XCircle size={15} /> : <CheckCircle2 size={15} />}</span></summary>
+                    <div className="thinking-steps">{turnActivitySteps.map((step) => { const presentation = activityPresentation(step); return <div className={`thinking-step tone-${eventTone(step.event.type)}`} key={step.events[0].event_id}><span className="thinking-step-icon">{step.event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(step.event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{presentation.title}</strong><time>{formatTime(step.event.timestamp)}</time></div><p>{presentation.description}</p><details className="thinking-payload"><summary>执行详情</summary><dl className="execution-details">{activityDetails(step).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details></div></div>; })}</div>
                   </details>}
                   {turnAnswer && <div className="answer-copy"><MarkdownAnswer content={turnAnswer} /><span className={`answer-cursor ${isLatestTurn && answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div>}
-                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>Local changes</strong><small>Unified diff included above.</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />Changes reverted</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />Undo changes</button>)}</div>}
+                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>本地修改</strong><small>上方包含统一 diff。</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />已撤销修改</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />撤销修改</button>)}</div>}
                 </div>
               </article>}
             </div>;
           })}
-          {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />Preparing activity</div>}
-        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>Choose a project first</h3><p>Select a real local project to enable file tools and commands.</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />Selecting folder...</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />Loading project...</> : <><FolderOpen size={14} />Choose project</>}</button></div>}
-          {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>Ready when you are</h3><p>Send a task and follow the Agent from intent to local tools to final answer.</p></div>}
+          {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />正在准备活动</div>}
+        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>请先选择项目</h3><p>选择一个本地项目，以启用文件工具和命令。</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />正在选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />正在加载项目…</> : <><FolderOpen size={14} />选择项目</>}</button></div>}
+          {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>你想从哪里开始？</h3><p>选择一个起点，或在下方描述自己的任务。</p><div className="starter-grid">{starterActions.map((action) => { const Icon = action.icon; return <button type="button" className="starter-card" key={action.id} onClick={() => chooseStarterPrompt(action.prompt)} disabled={busy || workspacePhase !== "idle"}><Icon size={17} /><span><strong>{action.title}</strong><small>{action.description}</small></span></button>; })}</div></div>}
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
 
-        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>Auto-approve local actions</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "Enabled for sent messages" : "Manual approval"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">Message the agent</label><div className="composer-input-shell"><textarea id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="Message the agent. Press Enter to send and Ctrl+Enter for a new line." placeholder={session ? "Ask the agent to inspect, edit, and verify your workspace..." : "Choose a workspace to enable local Agent tools..."} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "Cancel agent run" : "Send message"} title={busy ? "Cancel agent run" : "Send message"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "Cancel" : "Send"}</button></div></div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>自动批准本地操作</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "已对发送的消息启用" : "手动审批"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">给 Agent 发送消息</label><div className="composer-input-shell"><textarea ref={taskInputRef} id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="给 Agent 发送消息。按 Enter 发送，按 Ctrl+Enter 换行。" placeholder={session ? "让 Agent 检查、修改并验证你的工作区…" : "选择工作区后即可使用本地 Agent 工具…"} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "取消 Agent 执行" : "发送消息"} title={busy ? "取消 Agent 执行" : "发送消息"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "取消" : "发送"}</button></div></div>
       </section>
 
-      <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="Resize preview panel"></div>
-      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="File preview collapsed"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="Show preview" aria-label="Show preview"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="File preview"><div className="preview-heading"><div><div className="section-kicker">File preview</div><h3>{filePreview?.path ?? selectedFilePath ?? "No file"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="Hide preview panel" aria-label="Hide preview panel"><ChevronRight size={15} /></button></span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>Loading preview...</p><span>Reading the selected local file.</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>Preview unavailable</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>Could not preview this file</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>Choose a folder, then click a file in the workspace tree to preview it.</p></div>}</aside>}
+      <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="调整文件预览面板宽度"></div>
+      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="文件预览面板已折叠"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="显示预览" aria-label="显示预览"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="文件预览"><div className="preview-heading"><div><div className="section-kicker">文件预览</div><h3>{filePreview?.path ?? selectedFilePath ?? "暂无文件"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="隐藏预览面板" aria-label="隐藏预览面板"><ChevronRight size={15} /></button></span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>正在加载预览…</p><span>正在读取选中的本地文件。</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>无法预览</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>文件预览失败</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>选择文件夹后，点击左侧工作区树中的文件即可预览。</p></div>}</aside>}
     </main>
   </div>;
 }

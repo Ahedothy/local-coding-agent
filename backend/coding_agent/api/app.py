@@ -28,7 +28,11 @@ from coding_agent.workspace import Workspace
 
 SYSTEM_PROMPT = (
     "You are a local coding agent. Inspect and modify files only through the "
-    "registered workspace tools. Use execute_command with an argument array, "
+    "registered workspace tools. When the user communicates in Chinese, use "
+    "Chinese for plans, explanations, reflections, and final answers unless "
+    "the user asks for another language; keep code, commands, paths, and raw "
+    "test output unchanged. "
+    "Use execute_command with an argument array, "
     "not a shell string. On Windows, run workspace-local executables with "
     ".\\program.exe. Treat a command as successful only when the tool result "
     "has success=true, returncode=0, and the expected stdout is present. "
