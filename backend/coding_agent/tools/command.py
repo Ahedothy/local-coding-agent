@@ -128,7 +128,11 @@ async def _cleanup_process(
 
 class ExecuteCommandTool(Tool):
     name: ClassVar[str] = "execute_command"
-    description: ClassVar[str] = "Run a non-interactive command locally inside the workspace."
+    description: ClassVar[str] = (
+        "Run a non-interactive command locally with a validated workspace cwd. "
+        "The child process is not an operating-system sandbox and retains the "
+        "current user's permissions."
+    )
     parameters_model: ClassVar[type[BaseModel]] = ExecuteCommandArguments
 
     async def execute(

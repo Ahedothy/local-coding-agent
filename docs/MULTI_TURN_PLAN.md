@@ -230,13 +230,13 @@ AgentRunResult(status=FAILED, error="agent is already running a turn")
 Keep one-shot mode:
 
 ```text
-python -m coding_agent.cli --workspace demo/buggy_calculator --provider real "Fix tests"
+python -m coding_agent.cli --workspace demo_task_manager --provider real "Fix tests"
 ```
 
 Add interactive mode:
 
 ```text
-python -m coding_agent.cli --workspace demo/buggy_calculator --provider real --interactive
+python -m coding_agent.cli --workspace demo_task_manager --provider real --interactive
 ```
 
 Recommended parser rules:
@@ -368,7 +368,7 @@ From `backend/`:
 
 ```powershell
 python -m coding_agent.cli `
-  --workspace "C:\SoftwareForProgramming\NJUrecomProject\demo\buggy_calculator" `
+  --workspace "C:\SoftwareForProgramming\NJUrecomProject\demo_task_manager" `
   --provider real `
   --interactive
 ```

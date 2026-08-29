@@ -438,7 +438,14 @@ MVP must implement:
 - truncate stdout and stderr
 - block obviously dangerous commands as defense in depth
 
-This is not a complete security sandbox. It is a reasonable, explainable safety boundary for a student project.
+This is not a complete security sandbox. The Workspace boundary applies to
+direct file operations and to the command working directory; it does not
+restrict every file or system resource reachable by a child process. A command
+still runs with the current user's permissions. `shell=False`, argument-array
+invocation, approval, timeouts, output limits, and obvious-executable blocking
+reduce accidental and shell-injection risk, but they do not replace an OS or
+container sandbox. This is a reasonable, explainable safety boundary for a
+local student project, and the limitation must be disclosed to users.
 
 ## Context Management
 

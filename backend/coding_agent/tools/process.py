@@ -208,8 +208,10 @@ class ManageProcessTool(Tool):
     name: ClassVar[str] = "manage_process"
     description: ClassVar[str] = (
         "Start, inspect, read, write stdin to, or stop a bounded local process "
-        "inside the workspace. Uses argument arrays, shell=False, bounded output, "
-        "and explicit process handles; it never runs shell strings."
+        "with a validated workspace cwd. The child process is not an operating-"
+        "system sandbox and retains the current user's permissions. Uses argument "
+        "arrays, shell=False, bounded output, and explicit process handles; it "
+        "never runs shell strings."
     )
     parameters_model: ClassVar[type[BaseModel]] = ManageProcessArguments
 

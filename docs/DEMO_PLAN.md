@@ -20,84 +20,48 @@ The viewer should see:
 Location:
 
 ```text
-demo/buggy_calculator/
+demo_task_manager/
 ```
 
 Recommended structure:
 
 ```text
-demo/buggy_calculator/
+demo_task_manager/
   README.md
   pyproject.toml
-  calculator.py
-  test_calculator.py
+  task_manager/
+    __init__.py
+    models.py
+    store.py
+    service.py
+    report.py
+  test_task_manager.py
 ```
 
 ## Bug Design
 
-The demo project should be very small and deterministic.
+The demo is intentionally small, deterministic, and multi-file. It contains an
+in-memory `TaskStore`, a `TaskService` with search and pagination, and a report
+function that aggregates status counts.
 
-Recommended source:
+The failing tests require the agent to discover and fix three related defects:
 
-```python
-def add(a, b):
-    return a + b
+- title search should be case-insensitive;
+- pagination should use a zero-based offset;
+- report `total` should count every task, not only completed tasks.
 
-def divide(a, b):
-    if b == 0:
-        return 0
-    return a / b
-
-def average(numbers):
-    return sum(numbers) / len(numbers)
-```
-
-Recommended tests:
-
-```python
-import pytest
-
-from calculator import add, average, divide
-
-
-def test_add():
-    assert add(2, 3) == 5
-
-
-def test_divide():
-    assert divide(6, 3) == 2
-
-
-def test_divide_by_zero():
-    with pytest.raises(ValueError):
-        divide(1, 0)
-
-
-def test_average():
-    assert average([2, 4, 6]) == 4
-
-
-def test_average_empty():
-    with pytest.raises(ValueError):
-        average([])
-```
-
-Expected bugs:
-
-- `divide(1, 0)` returns `0` instead of raising `ValueError`
-- `average([])` raises `ZeroDivisionError` instead of a clear `ValueError`
-
-The correct fix is small:
-
-- `divide` should raise `ValueError` when divisor is zero
-- `average` should raise `ValueError` when the list is empty
+The expected code changes touch both `task_manager/service.py` and
+`task_manager/report.py`, which makes the diff and verification more
+representative of a real maintenance task than a one-file edge-case fix.
 
 ## User Prompt
 
 Use this prompt for the demo:
 
 ```text
-Please fix the failing tests in this small Python project. Read the code, run the tests, make the minimal code change, and run the tests again.
+Please fix the failing tests in this small Python project. Inspect the tests and
+implementation first, make the minimal multi-file change, and run the complete
+test suite again. Do not change the public API or weaken the tests.
 ```
 
 ## Ideal Agent Execution Trace
@@ -116,13 +80,19 @@ tool_finished: list_files
 
 iteration_started
 model_request
-model_response: tool_call read_file calculator.py
+model_response: tool_call read_file test_task_manager.py
 tool_started: read_file
 tool_finished: read_file
 
 iteration_started
 model_request
-model_response: tool_call read_file test_calculator.py
+model_response: tool_call read_file task_manager/service.py
+tool_started: read_file
+tool_finished: read_file
+
+iteration_started
+model_request
+model_response: tool_call read_file task_manager/report.py
 tool_started: read_file
 tool_finished: read_file
 
@@ -134,9 +104,9 @@ tool_finished: execute_command exit_code=1
 
 iteration_started
 model_request
-model_response: tool_call replace_in_file
-tool_started: replace_in_file
-tool_finished: replace_in_file
+model_response: tool_call apply_patch (service.py and report.py)
+tool_started: apply_patch
+tool_finished: apply_patch
 
 iteration_started
 model_request
@@ -210,8 +180,8 @@ The command is executed locally with a workspace cwd, timeout, and output limit.
 
 Show code editing:
 
-- `replace_in_file`
-- changed `calculator.py`
+- `apply_patch`
+- changed `task_manager/service.py` and `task_manager/report.py`
 
 If using an editor side by side, show the small diff or the updated function.
 

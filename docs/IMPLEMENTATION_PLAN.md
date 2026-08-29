@@ -419,7 +419,7 @@ Completion criteria:
 Example:
 
 ```text
-python -m coding_agent.cli --workspace demo/buggy_calculator "fix the failing tests"
+python -m coding_agent.cli --workspace demo_task_manager "fix the failing tests"
 ```
 
 Do not:
@@ -469,7 +469,7 @@ Goal:
 
 Location:
 
-- `demo/buggy_calculator/`
+- `demo_task_manager/`
 
 Completion criteria:
 
@@ -578,7 +578,7 @@ CLI behavior:
 Example:
 
 ```text
-python -m coding_agent.cli --workspace demo/buggy_calculator --provider real --interactive
+python -m coding_agent.cli --workspace demo_task_manager --provider real --interactive
 ```
 
 Completion criteria:
