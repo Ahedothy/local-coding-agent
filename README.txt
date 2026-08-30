@@ -1,32 +1,38 @@
 项目名称：lvyiyou-coding-agent
 Git 仓库：https://github.com/Ahedothy/lvyiyou-coding-agent
 
-运行环境：Python 3.12+、Node.js 20+。
+配置：复制 .env.example 为 .env，设置 OPENAI_API_KEY、OPENAI_BASE_URL、
+OPENAI_MODEL。
 
-安装后端：
-python -m pip install -e ".[test,server]"
+安装（首次在项目根目录执行）：
+python -m pip install -e .
 
-配置：
-复制 .env.example 为 .env，设置 OPENAI_API_KEY、OPENAI_BASE_URL 和
-OPENAI_MODEL。API Key 不得提交到 Git。
-
-运行中文 Web 界面：
+Web：
+终端1：
 cd backend
 python -m uvicorn coding_agent.api:app --port 8000
+终端2：
+ cd frontend、npm ci、npm run dev。
 
-另开终端：
-cd frontend
-npm ci
-npm run dev
-
-也可使用 CLI：
+CLI：
 cd backend
-python -m coding_agent.cli --workspace "项目目录" --provider real "编程任务"
+python -m coding_agent.cli 项目目录
+（目录含空格时需使用双引号）
 
-特色：
-本项目未使用任何 Agent 框架或 Agent SDK，自行实现模型工具调用循环、上下文压缩、
-本地文件与命令工具、文件工作区路径限制、命令 cwd 校验、超时和重复调用终止、操作审批、修改 diff 与撤销、
-多轮对话、SSE 事件展示及 SQLite 历史恢复。新会话提供“探索代码、构建功能、审查代码、修复问题”快捷入口，
-点击后可继续编辑任务再发送。模型只负责产生工具调用，本地工具的校验、
-执行和结果回传均由项目代码完成。命令在选定项目目录中使用参数数组、shell=False、
-审批、超时和输出限制执行。自动化测试共 169 项。
+只给目录时默认使用 real provider 并进入交互模式，在 > 提示符输入任务；
+/help 查看提示，/exit 或 /quit 退出。目录后追加任务会执行一次并退出；也支持
+--interactive、--one-shot，--provider mock 可离线测试。
+
+CLI 默认展示简洁的计划、工具活动、审批、失败和完成状态。
+--event-log 保存完整日志，--raw-events 输出完整事件；TTY 自动启用 ANSI 颜色，
+重定向或 NO_COLOR 时降级为纯文本，最终 diff 高亮增删行。
+最终回复默认只汇总修改；需要完整 diff 时加 --show-diff。
+执行命令、编辑文件等有副作用的操作前会在终端询问：y 允许一次，a 允许本轮，
+文件修改时可用 d 查看完整 diff，其他输入拒绝；退出查看后返回审批。CLI 不提供历史浏览命令，会把事件写入 Web UI 共用的
+backend\history.db，之后可在 Web UI 中查看和回放；可用 CODING_AGENT_HISTORY_DIR
+指定其他数据库位置。
+
+特色：不依赖 Agent 框架或 SDK，自行实现工具调用循环、上下文压缩、本地工具、
+工作区边界、审批、超时、修改撤销、多轮对话、SSE 展示及 SQLite 历史恢复；新会话
+提供探索代码、构建功能、审查代码、修复问题快捷入口。
+测试 177 项。

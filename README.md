@@ -28,9 +28,16 @@ The current repository has been tested with Python 3.13 on Windows.
 Setup
 -----
 
-From the repository root:
+From the repository root, install the project and all of its CLI, Web UI, and
+test dependencies once:
 
-    python -m pip install -e ".[test]"
+    python -m pip install -e .
+
+The `-e` option means “editable install”: Python imports the source directly,
+so later code changes take effect without reinstalling. The default install
+includes FastAPI/OpenAI for the application, uvicorn for the Web API, and
+pytest/httpx for verification. The older `.[test,server]` form remains
+accepted for compatibility, but is no longer necessary.
 
 For real model calls, copy `.env.example` to `.env` and set the provider
 configuration. `.env` is ignored by Git and must never be committed.
@@ -55,29 +62,56 @@ The automated tests use MockModelProvider and do not require a network or API
 key. One Windows symlink test may be skipped when the current account cannot
 create symbolic links.
 
-One-Shot Mode
--------------
+CLI
+---
 
 Run the CLI from the `backend` directory. The workspace can be any existing
-directory; it does not have to be inside this repository.
+directory; it does not have to be inside this repository. The recommended
+short form uses the real provider and starts an interactive session when only
+the workspace is supplied:
 
     cd backend
+    python -m coding_agent.cli C:\path\to\workspace
+
+If the path contains spaces, wrap it in double quotes. For example:
+
+    python -m coding_agent.cli "C:\path\to\my project"
+
+Enter a task at the prompt, then use `/help` for a short command guide and
+`/exit` or `/quit` to leave. If a task is supplied after the workspace, the CLI
+automatically runs one turn and exits:
+
     python -m coding_agent.cli `
-      --workspace "C:\\path\\to\\workspace" `
-      --provider real `
+      C:\path\to\workspace `
       "Fix the failing tests. Read the code, run the tests, make the minimal changes, and run the tests again."
+
+The equivalent explicit forms are `--interactive` and `--one-shot`. The named
+`--workspace` form remains supported for compatibility with earlier versions.
 
 For a local smoke test without an API key:
 
     python -m coding_agent.cli `
-      --workspace "C:\\path\\to\\workspace" `
       --provider mock `
+      C:\path\to\workspace `
       "Inspect the project"
 
 Direct filesystem tools are restricted to the configured workspace. Commands
 are started locally with a validated workspace working directory, argument-array
 invocation, `shell=False`, a timeout, bounded output, and an approval gate for
 side effects.
+
+Before a side-effecting command, process operation, or file edit, the CLI asks
+for confirmation in the terminal. Enter `y` to approve one action, `a` to
+approve subsequent actions in the current turn, or any other input to reject.
+For file edits, `d` first opens the complete diff; after leaving the diff
+viewer, the CLI returns to the approval prompt. Long diff previews open in the
+terminal pager; use Space to advance a page and the pager's usual `q` key to
+leave it.
+redirected or non-interactive output uses a bounded preview instead.
+CLI does not provide history browsing commands, but it writes the same local
+SQLite history database used by the Web UI (`backend\history.db` by default),
+so completed CLI runs can be viewed and replayed there. Set
+`CODING_AGENT_HISTORY_DIR` to point both transports at another database.
 
 Event Logs and Trace Replay
 ---------------------------
@@ -99,6 +133,16 @@ Use `--json` instead of the default text format when another script needs to
 consume the summary. The trace command is read-only: it parses recorded events,
 but never calls the model, executes tools, or restores a live conversation.
 
+The terminal displays a concise activity timeline rather than dumping every
+JSON event payload. Plans, tool activity, approvals, failures, and completion
+are shown with stable event labels; the complete JSONL remains available in
+`--event-log`. The final CLI answer summarizes accumulated changes instead of
+repeating a large diff; add `--show-diff` when the full diff is needed. Add
+`--raw-events` when debugging or piping the full event stream to another
+program. ANSI colors are enabled automatically in an
+interactive terminal (and disabled for redirected output or when `NO_COLOR` is
+set); diff blocks in the final answer highlight additions and deletions.
+
 For non-trivial tasks, the model may include a short plan before its first tool
 call and a short reflection after later tool results. These are optional event
 annotations around the existing Agent loop, and simple tasks can still go
@@ -107,9 +151,9 @@ directly to an answer.
 Run History and Replay
 ----------------------
 
-The Web API records run metadata, every event, the latest session state, and an
-exact bounded snapshot for each run in a local SQLite database. The default database is located in the
-backend data directory:
+The Web API and CLI record run metadata, every event, the latest session state,
+and an exact bounded snapshot for each run in a local SQLite database. The
+default database is located in the backend data directory:
 
     backend\history.db
 
@@ -135,10 +179,7 @@ Interactive mode creates one Agent and reuses its Session and ContextManager
 for every user turn in the process:
 
     cd backend
-    python -m coding_agent.cli `
-      --workspace "C:\\path\\to\\workspace" `
-      --provider real `
-      --interactive
+    python -m coding_agent.cli C:\path\to\workspace
 
 Then enter messages at the `>` prompt:
 
@@ -147,6 +188,8 @@ Then enter messages at the `>` prompt:
     现在运行测试并修复失败的测试，尽量只做最小修改。
 
 Enter `/exit` or `/quit` to leave the conversation. Blank input is ignored.
+You can also press `Ctrl+C` at any time to cancel the current run and exit
+without an asyncio traceback.
 An optional initial task can be supplied after `--interactive`; it is handled
 as the first turn before the CLI begins reading input.
 
