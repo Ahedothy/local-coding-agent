@@ -1,323 +1,262 @@
-lvyiyou-coding-agent
-====================
+# Local Coding Agent
 
-A student-built coding agent whose important logic is implemented locally:
+一个面向本地项目的编程智能体。用户用自然语言描述任务后，Agent 会在选定的工作区内阅读代码、搜索相关位置、修改文件、运行测试，并根据工具结果继续迭代，直到给出结论或遇到明确的停止条件。
 
-- explicit Agent Runtime loop
-- provider-neutral model adapter
-- Tool Registry and Tool Executor
-- local filesystem and command tools
-- workspace path and command safety boundary
-- bounded ContextManager
-- in-memory multi-turn conversation
-- local SQLite run history, replay, and resumable conversations
-- deterministic MockModelProvider tests
+项目的重点不是提供一个聊天界面，而是自行实现一条可观察、可验证的 Agent 执行链路：模型提出结构化的工具调用意图，工具的参数校验、审批、实际执行、结果回传和循环控制全部发生在本地代码中。
 
-The project does not use LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK,
-Claude Agent SDK, AutoGen, CrewAI, or another Agent framework.
+## 项目特点
 
-Requirements
-------------
+- **面向真实编程任务**：支持探索代码、构建功能、审查实现、修复缺陷和运行测试，而不只是生成一段代码。
+- **从分析到验证的闭环**：Agent 可以先理解项目，再进行多文件修改，执行测试或其他验证命令，并根据失败结果继续修复。
+- **可控的本地操作**：命令执行、文件写入、补丁应用和进程管理在产生副作用前请求用户审批；文件修改可在审批时查看完整 diff。
+- **CLI 与 Web UI 两种体验**：CLI 适合快速、直接地处理本地任务；Web UI 以时间线、可折叠的 Agent 活动面板、diff 和审批卡片展示执行过程。
+- **多轮协作与历史回放**：一次会话可以连续追问；CLI 和 Web UI 共用本地 SQLite 历史，CLI 产生的运行记录可以在 Web UI 中回放并继续。
+- **可解释的 Agent 行为**：计划、工具活动、审批、错误和完成状态都以事件形式记录，便于用户理解运行过程，也便于测试和演示。
 
-- Python 3.12 or newer
-- pytest for the test suite
-- an API key only when using the real provider
+项目没有使用 LangChain、LangGraph、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架或 SDK。允许使用模型厂商的 API 客户端和原生 tool calling，但模型服务端不执行本项目的文件或命令工具。
 
-The current repository has been tested with Python 3.13 on Windows.
+## 快速开始
 
-Setup
------
+### 环境要求
 
-From the repository root, install the project and all of its CLI, Web UI, and
-test dependencies once:
+- Python 3.12 或更高版本
+- Node.js 和 npm（仅运行 Web UI 时需要）
+- 使用真实模型时，需要一个支持 tool calling 的 OpenAI 兼容接口
 
-    python -m pip install -e .
+项目主要在 Windows、Python 3.13 环境下验证，也可以在其他支持 Python、`asyncio` 和本地子进程的系统上运行。
 
-The `-e` option means “editable install”: Python imports the source directly,
-so later code changes take effect without reinstalling. The default install
-includes FastAPI/OpenAI for the application, uvicorn for the Web API, and
-pytest/httpx for verification. The older `.[test,server]` form remains
-accepted for compatibility, but is no longer necessary.
+### 安装
 
-For real model calls, copy `.env.example` to `.env` and set the provider
-configuration. `.env` is ignored by Git and must never be committed.
+在仓库根目录执行：
 
-The supported variables are:
+```powershell
+python -m pip install -e .
+```
 
-    OPENAI_API_KEY=your-key
-    OPENAI_BASE_URL=https://api.openai.com/v1
-    OPENAI_MODEL=your-model-name
+这是可编辑安装：源码修改后不需要重复安装。默认依赖已经包含 CLI、Web API 和测试所需的 FastAPI、OpenAI、Uvicorn、pytest、httpx 等组件；不需要再额外拼接 `.[test,server]`。
 
-The provider is OpenAI-compatible. The model must support tool calling for
-coding tasks that need local tools.
+### 配置模型
 
-Run Tests
----------
+复制 `.env.example` 为 `.env`，填写 OpenAI 兼容接口配置：
 
-From the repository root:
+```text
+OPENAI_API_KEY=your-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=your-model-name
+```
 
-    python -m pytest
+`.env` 已被 Git 忽略，密钥不要提交到仓库、README 或演示视频。`OPENAI_BASE_URL` 可以指向兼容 OpenAI 接口的本地网关或其他服务；模型需要能够返回结构化工具调用。
 
-The automated tests use MockModelProvider and do not require a network or API
-key. One Windows symlink test may be skipped when the current account cannot
-create symbolic links.
+## 命令行（CLI）
 
-CLI
----
+### 推荐用法
 
-Run the CLI from the `backend` directory. The workspace can be any existing
-directory; it does not have to be inside this repository. The recommended
-short form uses the real provider and starts an interactive session when only
-the workspace is supplied:
-
-    cd backend
-    python -m coding_agent.cli C:\path\to\workspace
-
-If the path contains spaces, wrap it in double quotes. For example:
-
-    python -m coding_agent.cli "C:\path\to\my project"
-
-Enter a task at the prompt, then use `/help` for a short command guide and
-`/exit` or `/quit` to leave. If a task is supplied after the workspace, the CLI
-automatically runs one turn and exits:
-
-    python -m coding_agent.cli `
-      C:\path\to\workspace `
-      "Fix the failing tests. Read the code, run the tests, make the minimal changes, and run the tests again."
+在 `backend` 目录启动交互式 CLI：
 
-The equivalent explicit forms are `--interactive` and `--one-shot`. The named
-`--workspace` form remains supported for compatibility with earlier versions.
+```powershell
+cd backend
+python -m coding_agent.cli C:\path\to\workspace
+```
 
-For a local smoke test without an API key:
+只有一个工作目录参数时，默认使用真实模型并进入交互模式。路径中没有空格时可以不加引号；路径包含空格时使用双引号：
 
-    python -m coding_agent.cli `
-      --provider mock `
-      C:\path\to\workspace `
-      "Inspect the project"
+```powershell
+python -m coding_agent.cli "C:\path\to\my project"
+```
 
-Direct filesystem tools are restricted to the configured workspace. Commands
-are started locally with a validated workspace working directory, argument-array
-invocation, `shell=False`, a timeout, bounded output, and an approval gate for
-side effects.
-
-Before a side-effecting command, process operation, or file edit, the CLI asks
-for confirmation in the terminal. Enter `y` to approve one action, `a` to
-approve subsequent actions in the current turn, or any other input to reject.
-For file edits, `d` first opens the complete diff; after leaving the diff
-viewer, the CLI returns to the approval prompt. Long diff previews open in the
-terminal pager; use Space to advance a page and the pager's usual `q` key to
-leave it.
-redirected or non-interactive output uses a bounded preview instead.
-CLI does not provide history browsing commands, but it writes the same local
-SQLite history database used by the Web UI (`backend\history.db` by default),
-so completed CLI runs can be viewed and replayed there. Set
-`CODING_AGENT_HISTORY_DIR` to point both transports at another database.
-
-Event Logs and Trace Replay
----------------------------
-
-Record a run as JSONL by adding `--event-log`:
-
-    cd backend
-    python -m coding_agent.cli `
-      --workspace "C:\path\to\workspace" `
-      --provider real `
-      --event-log "..\event_logs\demo.jsonl" `
-      "Inspect the project, fix the failing tests, and run them again."
-
-After the run, print a readable summary and chronological replay:
-
-    python -m coding_agent.trace "..\event_logs\demo.jsonl" --timeline
-
-Use `--json` instead of the default text format when another script needs to
-consume the summary. The trace command is read-only: it parses recorded events,
-but never calls the model, executes tools, or restores a live conversation.
-
-The terminal displays a concise activity timeline rather than dumping every
-JSON event payload. Plans, tool activity, approvals, failures, and completion
-are shown with stable event labels; the complete JSONL remains available in
-`--event-log`. The final CLI answer summarizes accumulated changes instead of
-repeating a large diff; add `--show-diff` when the full diff is needed. Add
-`--raw-events` when debugging or piping the full event stream to another
-program. ANSI colors are enabled automatically in an
-interactive terminal (and disabled for redirected output or when `NO_COLOR` is
-set); diff blocks in the final answer highlight additions and deletions.
-
-For non-trivial tasks, the model may include a short plan before its first tool
-call and a short reflection after later tool results. These are optional event
-annotations around the existing Agent loop, and simple tasks can still go
-directly to an answer.
-
-Run History and Replay
-----------------------
-
-The Web API and CLI record run metadata, every event, the latest session state,
-and an exact bounded snapshot for each run in a local SQLite database. The
-default database is located in the backend data directory:
-
-    backend\history.db
-
-Set `CODING_AGENT_HISTORY_DIR` to choose another local database path (or a
-directory in which `history.db` should be created). The Web UI loads this
-history into Recent tasks, grouped by conversation session. A new session is
-shown immediately as `New conversation`; after its first message, a short
-stable title is generated from that message and is never changed by later
-runs. Selecting a task
-replays all recorded turns, tool activity, approvals, errors, final answers,
-and changes for that session. Replay is read-only: it never calls the model,
-executes tools, restores a pending approval, or changes the current workspace.
-The `Continue` action then restores the historical workspace and the latest
-bounded ContextManager snapshot for that conversation, and creates a new user
-turn in the same conversation. Tool output is bounded but is not
-automatically secret-redacted, so keep a custom history database local and do
-not use it for shared or sensitive logs.
-
-Interactive Multi-Turn Mode
-----------------------------
-
-Interactive mode creates one Agent and reuses its Session and ContextManager
-for every user turn in the process:
-
-    cd backend
-    python -m coding_agent.cli C:\path\to\workspace
-
-Then enter messages at the `>` prompt:
-
-    你好，请简单介绍一下你能做什么。
-    请读取这个项目的结构，告诉我它的功能。
-    现在运行测试并修复失败的测试，尽量只做最小修改。
-
-Enter `/exit` or `/quit` to leave the conversation. Blank input is ignored.
-You can also press `Ctrl+C` at any time to cancel the current run and exit
-without an asyncio traceback.
-An optional initial task can be supplied after `--interactive`; it is handled
-as the first turn before the CLI begins reading input.
-
-    python -m coding_agent.cli `
-      --workspace "C:\\path\\to\\workspace" `
-      --provider real `
-      --interactive `
-      "先分析这个项目"
-
-Manual Multi-Turn Verification
-------------------------------
-
-1. Start interactive mode with a small workspace.
-2. Ask the agent to inspect the project.
-3. Ask a follow-up question that depends on the previous answer or tool result.
-4. Confirm that the second turn produces a new `user_message`, `model_request`,
-   and `agent_finished` event while using the same running process.
-5. Ask it to make a small code change and run the tests.
-6. Exit with `/exit`.
-
-The conversation is held in memory only. Closing the CLI process discards the
-conversation. Session persistence and conversation restore are not implemented.
-Use the real provider for manual multi-turn
-verification; the CLI mock provider is a one-shot smoke-test provider, while
-multi-turn mock behavior is covered by the automated Agent Core tests.
-
-Web UI
-------
-
-The optional web interface uses the existing Agent Core through FastAPI and
-SSE. Start the backend from one PowerShell window:
-
-    cd backend
-    python -m uvicorn coding_agent.api:app --port 8000
-
-Start the React development server from a second PowerShell window:
-
-    cd frontend
-    npm install
-    npm run dev
-
-Open the URL printed by Vite, usually `http://127.0.0.1:5173/`. Enter an
-existing local workspace path, create a session, and submit a task. The page
-shows a streaming conversation: the user task appears first, model and local
-tool activity is grouped into a collapsible Thinking Process, and the final
-answer is progressively revealed as the run completes. The workspace,
-conversation, and file preview are independent panes; desktop users can resize
-or collapse the side panes, while the message composer remains docked at the
-bottom of the center pane. A new session also offers starter actions for
-exploring a codebase, building a feature, reviewing code, or fixing a bug;
-clicking one fills an editable task prompt without starting a run automatically.
-
-On Windows, do not start the backend with `--reload`. The reload subprocess can
-select an asyncio event loop that does not support `create_subprocess_exec`,
-which causes `execute_command` to fail with `NotImplementedError`. Restart the
-backend manually after changing Python code.
-
-The web session supports multiple user turns while the browser page and backend
-process remain alive. Refreshing the page or changing the workspace creates a
-new in-memory session, while completed run history remains available through
-the local SQLite history store. A historical conversation can be continued
-explicitly from Recent tasks.
-
-Local Inspection Tools
-----------------------
-
-The Agent also has four bounded, read-only inspection tools:
-
-- `get_file_info` reports file or directory metadata, detected file type and
-  MIME type, text/binary status, best-effort encoding and confidence, and line
-  count when the file is within the inspection limit. It recognizes BOMs,
-  common legacy text encodings, and common binary file signatures while making
-  heuristic results explicit.
-- `list_directory_tree` shows a compact directory-first tree with depth,
-  entry, and generated-directory ignore rules.
-- `git_diff` shows local Git status and a bounded unified diff without exposing
-  `.git` metadata or mutating the repository.
-- `inspect_environment` reports local platform details, fixed runtime/compiler/
-  package-manager probes, project marker files, redacted configuration presence,
-  and candidate localhost port availability. It does not accept arbitrary
-  commands or modify the workspace.
-
-These tools operate on the selected local Workspace. File paths and command
-working directories are checked by the Workspace security boundary. The
-existing `execute_command` remains the path for running tests, so test commands
-keep one consistent timeout, cwd, shell, and exit-status policy.
-Formatter-specific execution, package installation, network browsing, and Git
-mutation are intentionally outside the current tool set.
-
-Local Process Management
-------------------------
-
-For a development server or interactive local program that must remain alive
-across multiple Agent calls, use `manage_process`. It supports `start`, `list`,
-`status`, `read`, `write`, and `stop`. The start command is still an argument
-array, not a shell string; output is drained locally into bounded buffers, and
-the returned process handle is used for later operations. Starting, writing,
-and stopping require local approval. The tool does not install packages, create
-detached system services, or restore processes after the Agent session ends.
-
-Demo Repository
----------------
-
-The deterministic demo is in `demo_task_manager`. It is a small multi-file task
-management library with intentional defects in search, pagination, and report
-aggregation. Reset it to the failing state before each real-model rehearsal,
-then run:
-
-    cd backend
-    python -m coding_agent.cli `
-      --workspace "C:\\path\\to\\lvyiyou-coding-agent\\demo_task_manager" `
-      --provider real `
-      "Please fix the failing tests in this small Python project. Inspect the tests and implementation first, make the minimal multi-file change, and run the complete test suite again."
-
-The expected proof is visible in the event stream:
-
-    list_files -> read_file (tests and implementation) -> execute_command (failure)
-    -> apply_patch (two files) -> execute_command (success) -> final answer
-
-The model requests tools, but all file reads, edits, and test commands happen
-in the local ToolExecutor inside the configured workspace.
-
-Project Documentation
----------------------
-
-- `docs/ARCHITECTURE.md`: system architecture and module boundaries
-- `docs/IMPLEMENTATION_PLAN.md`: milestone order and completion criteria
-- `docs/IMPLEMENTATION_RULES.md`: constraints for future implementation work
-- `docs/TEST_PLAN.md`: test strategy and required scenarios
-- `docs/DEMO_PLAN.md`: bug-fix demo and video plan
-- `docs/MULTI_TURN_PLAN.md`: multi-turn design and implementation scope
+启动后在简洁的 `>` 提示符中输入任务，例如：
+
+```text
+> 请先了解这个项目的结构，再运行测试并修复失败项。完成后说明修改了什么。
+> 继续检查刚才的修改是否有遗漏，并补充必要的测试。
+```
+
+输入 `/help` 查看提示，输入 `/exit` 或 `/quit` 退出。空行会被忽略；按 `Ctrl+C` 会正常结束 CLI，不显示 asyncio traceback。
+
+### 审批与 diff
+
+读取文件、搜索代码等只读操作会直接执行。命令执行、文件写入、补丁应用和进程的启动、输入、停止等有副作用的操作会先等待审批。
+
+- **命令审批**：显示待执行命令和工作目录，可选择仅允许本次、允许当前消息后续操作，或拒绝。
+- **文件修改审批**：先列出将要修改的文件。输入 `d` 可展开完整 unified diff；较长的 diff 会进入终端分页器，按 Space 翻页、按 `q` 返回审批提示，然后再决定是否允许。
+- 拒绝审批后，工具不会执行，Agent 会收到拒绝结果并自行调整方案或向用户说明。
+
+每轮完成时，CLI 默认输出简洁的修改摘要、文件列表以及新增/删除行数，不把很长的 diff 再重复打印一遍。需要诊断原始事件或完整最终 diff 时，可以使用下面的高级选项。
+
+### 高级选项
+
+```powershell
+# 使用确定性的本地 Mock provider 做冒烟测试（不需要 API key）
+python -m coding_agent.cli --provider mock C:\path\to\workspace
+
+# 将结构化事件追加到 JSONL，便于演示或调试
+python -m coding_agent.cli --event-log ..\event_logs\demo.jsonl C:\path\to\workspace
+
+# 输出完整事件流，适合调试脚本；普通用户不需要开启
+python -m coding_agent.cli --raw-events C:\path\to\workspace
+
+# 在最终回答中显示本轮累计的完整 diff
+python -m coding_agent.cli --show-diff C:\path\to\workspace
+
+# 一次性任务
+python -m coding_agent.cli --workspace C:\path\to\workspace --one-shot "检查并修复测试"
+```
+
+
+## Web UI
+
+Web UI 由 FastAPI 后端和 React + TypeScript + Vite 前端组成。它们复用同一套 Agent Core，页面只负责展示事件和提交用户操作，不在浏览器中重新实现 Agent 循环。
+
+终端一启动后端：
+
+```powershell
+cd backend
+python -m uvicorn coding_agent.api:app --port 8000
+```
+
+终端二启动前端：
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+打开 Vite 输出的地址（通常是 `http://127.0.0.1:5173/`），选择一个本地工作区后即可开始。首页提供四类可编辑的起点：探索代码、构建功能、审查代码、修复问题；点击只会填入任务，不会绕过用户确认自动执行。
+
+运行过程中，页面会显示用户消息、模型活动、工具调用和最终答复。Agent 活动面板可以折叠；文件修改会按文件展开 diff，并标出新增和删除行；审批卡片提供“仅批准一次”“自动批准本条消息后续操作”和“拒绝”；已经完成的修改可以使用“撤销修改”。
+
+## CLI 与 Web UI 的历史协作
+
+运行事件、会话元数据、每次运行的事件流以及受限的上下文快照会保存到本地 SQLite。默认位置为：
+
+```text
+backend\history.db
+```
+
+可以通过 `CODING_AGENT_HISTORY_DIR` 指定另一个数据库文件，或指定一个用于创建 `history.db` 的目录。CLI 本身保持轻量，不提供历史浏览命令；它写入的记录会出现在 Web UI 的“会话”列表中。Web UI 可以：
+
+1. 按工作区分组查看会话；
+2. 回放某次运行的消息、工具活动、审批、错误、最终答复和 diff；
+3. 以选中的历史上下文为起点继续对话，而不是重新执行旧的工具调用。
+
+当前交互进程中的会话仍由内存中的 `Session` 和 `ContextManager` 驱动；数据库用于记录和恢复已保存的运行状态。工具输出会做长度限制，但不会自动识别和脱敏所有秘密信息，因此不要把包含敏感内容的历史数据库上传或共享。
+
+## Agent 能做什么
+
+模型可以使用以下本地工具组合完成任务：
+
+| 类别 | 工具 | 典型用途 |
+| --- | --- | --- |
+| 文件与代码 | `list_files`、`read_file`、`search_files` | 浏览目录、读取文本、定位定义和调用点 |
+| 文件修改 | `write_file`、`replace_in_file`、`apply_patch` | 写入文件、精确替换、小范围或多文件补丁 |
+| 验证与命令 | `execute_command`、`git_diff` | 运行测试、构建项目、查看 Git 状态和 diff |
+| 环境检查 | `get_file_info`、`list_directory_tree`、`inspect_environment` | 判断文件类型、快速了解目录结构、检查运行时和项目标记 |
+| 长驻进程 | `manage_process` | 启动、查看、读写和停止开发服务器或交互式程序 |
+
+工具返回统一的成功或失败结果，Agent 会把结果重新放入上下文，再决定下一步。简单问题可以直接回答；复杂问题通常会先给出简短计划，并在工具结果后进行检查或反思。
+
+编辑工具有明确分工：`replace_in_file` 用于一个小的、精确的连续替换；涉及多处、结构变化或多个文件时使用标准 unified diff 的 `apply_patch`。复杂补丁可以先用 `dry_run` 做本地校验，确认上下文和生成的 diff 后再正式写入。多个工具调用按顺序执行，并受每轮调用上限约束，以避免工具之间产生难以解释的竞态。
+
+## 执行流程
+
+一次用户消息的核心流程如下：
+
+```text
+用户任务
+  → 加入会话上下文
+  → 构造模型请求
+  → 解析模型文本和工具调用
+  → 通过 ToolExecutor 校验并执行本地工具
+  → 将工具结果写回上下文
+  → 重复，直到得到最终答复或触发停止条件
+```
+
+Agent Runtime 为每一轮维护迭代次数、工具调用次数、超时和重复失败调用等计数。达到上限、模型连续返回无效工具调用、任务超时或用户取消时，运行会以可解释的错误或停止状态结束，而不是无限循环。
+
+## 系统架构
+
+```text
+CLI ─────────────┐
+                 ├─ Agent Runtime ── ContextManager
+Web UI ─ FastAPI ┘         │
+                           ├─ ModelProvider
+                           ├─ ToolRegistry / ToolExecutor
+                           ├─ ApprovalGate
+                           ├─ Workspace
+                           └─ EventBus ── CLI / SSE / SQLite / JSONL
+```
+
+- **Agent Runtime**：实现模型调用、工具调用、结果回传和终止条件。
+- **ModelProvider**：把内部请求转换为 OpenAI 兼容请求，再把模型响应归一化为内部 `ModelResponse` 和 `ToolCall`。
+- **ContextManager**：维护 system、user、assistant、tool 消息，在字符预算超限时裁剪旧的非系统内容，并限制过长工具输出。
+- **ToolRegistry**：登记工具、暴露 JSON schema、检查名称唯一性。
+- **ToolExecutor**：使用同一套 Pydantic 参数模型做校验，执行工具并把异常转换成结构化结果。
+- **Workspace**：集中处理路径解析、工作区边界、文件大小和文本/二进制判断，以及命令工作目录校验。
+- **EventBus**：发布结构化事件，让 CLI、Web SSE、SQLite 历史和 JSONL 日志共享同一条可观察链路。
+
+模型厂商的 tool calling 在这里仅作为“模型表达工具意图的结构化格式”。模型服务端不会访问本地文件，也不会替项目执行命令；所有工具执行和循环控制由仓库中的 Python 代码完成。
+
+## 操作边界
+
+直接文件操作和命令工作目录都会经过工作区校验：路径会解析为真实路径，阻止常见的 `..` 越界、工作区外绝对路径、符号链接逃逸以及 `.git` 元数据访问；文本读写有大小限制，命令使用参数数组、`shell=False`、固定超时和有上限的输出。对明显危险的可执行文件还有额外的拒绝规则。
+
+这些措施解决的是本地开发中的误操作、路径越界和 shell 注入风险，并不改变子进程的用户权限。使用不可信项目或恶意代码时，应在容器、虚拟机、低权限账户等更强的系统隔离环境中运行本项目；审批也应当由用户结合命令内容自行判断。
+
+## 演示项目
+
+`demo_task_manager` 是一个小型多文件任务管理库，故意在搜索、分页和报表聚合处留下缺陷。可以在演示前恢复到失败状态，然后启动真实 provider：
+
+```powershell
+cd backend
+python -m coding_agent.cli "C:\path\to\local-coding-agent\demo_task_manager"
+```
+
+在 `>` 中输入：
+
+```text
+请先阅读项目结构和测试，运行完整测试套件，修复失败项，尽量保持修改最小，并再次运行测试验证。
+```
+
+一个有说服力的执行轨迹通常是：读取测试和实现 → 运行测试发现失败 → 修改两个相关文件 → 再次运行测试通过 → 汇总修改。演示时可以保留审批、Thinking Process、测试失败到成功的过程，能比单文件计算器更充分地体现 Agent 的自主分析和闭环验证能力。
+
+## 测试与开发
+
+运行完整测试：
+
+```powershell
+python -m pytest
+```
+
+测试使用 `MockModelProvider` 覆盖 Agent 循环、工具调用、上下文裁剪、审批、历史和错误处理，不需要网络或 API key。Windows 当前账户若没有创建符号链接的权限，相关安全场景会被 pytest 标记为跳过；这反映的是操作系统权限差异，不是测试失败。
+
+需要查看事件时间线时，可以先记录 JSONL，再使用只读 trace 工具：
+
+```powershell
+cd backend
+python -m coding_agent.cli --event-log ..\event_logs\demo.jsonl C:\path\to\workspace
+python -m coding_agent.trace ..\event_logs\demo.jsonl --timeline
+```
+
+trace 只解析已记录的事件，不会再次调用模型、执行工具或恢复活动中的审批。更完整的模块边界、测试策略和演示安排见：
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：架构、职责和设计取舍
+- [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md)：测试策略与场景
+- [`docs/DEMO_PLAN.md`](docs/DEMO_PLAN.md)：演示任务与视频流程
+- [`docs/MULTI_TURN_PLAN.md`](docs/MULTI_TURN_PLAN.md)：多轮会话设计
+- [`docs/IMPLEMENTATION_RULES.md`](docs/IMPLEMENTATION_RULES.md)：实现约束
+
+## 常见问题
+
+**为什么终端里找不到 `coding-agent` 命令？**  本项目的推荐入口是模块形式，不依赖系统 PATH 中存在额外的控制台脚本：
+
+```powershell
+cd backend
+python -m coding_agent.cli C:\path\to\workspace
+```
+
+**Windows 上后端启动后命令执行报 `NotImplementedError`？**  不要使用 `uvicorn --reload`。某些 Windows 环境下 reload 子进程会选择不支持 `create_subprocess_exec` 的事件循环；修改 Python 代码后手动重启后端即可。
+
+**路径什么时候需要引号？**  路径不含空格时可以直接写；含空格时必须用双引号。PowerShell 的反斜杠不需要额外转义。
+
+**没有 API key 能否试用？**  可以使用 `--provider mock` 做本地冒烟测试，但它不会模拟真实模型的完整规划能力；完整多轮和工具协作应使用真实 provider，自动化测试则使用仓库内的 Mock provider。

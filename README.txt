@@ -1,38 +1,37 @@
-项目名称：lvyiyou-coding-agent
-Git 仓库：https://github.com/Ahedothy/lvyiyou-coding-agent
+项目名称：Local Coding Agent
+Git 仓库：https://github.com/Ahedothy/local-coding-agent
 
-配置：复制 .env.example 为 .env，设置 OPENAI_API_KEY、OPENAI_BASE_URL、
-OPENAI_MODEL。
-
-安装（首次在项目根目录执行）：
+【安装】
+在项目根目录执行：
 python -m pip install -e .
+该命令包含 CLI、Web UI 和测试所需依赖。
+复制 .env.example 为 .env，设置OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL。
+API Key 等凭据不要提交到仓库。
 
-Web：
-终端1：
+【命令行使用（CLI）】
+cd backend
+python -m coding_agent.cli C:\path\to\workspace
+工作目录含空格时使用双引号。
+在 > 输入任务，/help 查看提示，/exit 或 /quit 退出。
+执行命令或修改文件前会请求审批：y 允许一次，a 允许本轮；文件修改时输入 d 可查看完整 diff。
+
+【网页界面使用（Web UI）】
+终端一：
 cd backend
 python -m uvicorn coding_agent.api:app --port 8000
-终端2：
- cd frontend、npm ci、npm run dev。
+终端二：
+cd frontend
+npm ci
+npm run dev
 
-CLI：
-cd backend
-python -m coding_agent.cli 项目目录
-（目录含空格时需使用双引号）
+【特色功能】
+- 用自然语言完成真实编程任务：阅读项目、定位问题、修改多个文件、运行测试，并根据结果继续修复；
+- Agent 自主组合文件读取、代码搜索、文件编辑、命令执行等工具，完成从分析到验证的闭环；
+- 命令和文件修改先请求审批，可查看涉及的文件与 diff，拒绝操作或只授权当前轮次；
+- CLI 展示计划、工具活动和结论；Web UI 提供可展开 diff、撤销修改、历史回放和继续会话；
+- 支持同一会话多轮追问，CLI 运行记录可在 Web UI 中继续，适合持续迭代开发。
 
-只给目录时默认使用 real provider 并进入交互模式，在 > 提示符输入任务；
-/help 查看提示，/exit 或 /quit 退出。目录后追加任务会执行一次并退出；也支持
---interactive、--one-shot，--provider mock 可离线测试。
-
-CLI 默认展示简洁的计划、工具活动、审批、失败和完成状态。
---event-log 保存完整日志，--raw-events 输出完整事件；TTY 自动启用 ANSI 颜色，
-重定向或 NO_COLOR 时降级为纯文本，最终 diff 高亮增删行。
-最终回复默认只汇总修改；需要完整 diff 时加 --show-diff。
-执行命令、编辑文件等有副作用的操作前会在终端询问：y 允许一次，a 允许本轮，
-文件修改时可用 d 查看完整 diff，其他输入拒绝；退出查看后返回审批。CLI 不提供历史浏览命令，会把事件写入 Web UI 共用的
-backend\history.db，之后可在 Web UI 中查看和回放；可用 CODING_AGENT_HISTORY_DIR
-指定其他数据库位置。
-
-特色：不依赖 Agent 框架或 SDK，自行实现工具调用循环、上下文压缩、本地工具、
-工作区边界、审批、超时、修改撤销、多轮对话、SSE 展示及 SQLite 历史恢复；新会话
-提供探索代码、构建功能、审查代码、修复问题快捷入口。
-测试 177 项。
+【其它说明】
+项目未使用 Agent 框架或 Agent SDK，重要逻辑均自行实现。real provider 用于实际任务，
+mock provider、事件日志和测试工具用于离线验证与开发调试。demo_task_manager 可演示
+“阅读项目—修改代码—运行测试”的完整流程。

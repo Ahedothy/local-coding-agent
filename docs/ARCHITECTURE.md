@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-`lvyiyou-coding-agent` is a student-built coding agent. It should accept a programming task, interact with a large language model, decide when to use tools, execute those tools locally, update context with tool results, and continue until the task is complete or a termination condition is reached.
+`Local Coding Agent` is a student-built coding agent. It should accept a programming task, interact with a large language model, decide when to use tools, execute those tools locally, update context with tool results, and continue until the task is complete or a termination condition is reached.
 
 The project must demonstrate that the important agent logic is implemented in this repository:
 

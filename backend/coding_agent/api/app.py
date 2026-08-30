@@ -372,7 +372,7 @@ def create_app(
         agent_factory or _default_agent_factory,
         history_store=history_store,
     )
-    app = FastAPI(title="lvyiyou Coding Agent API")
+    app = FastAPI(title="Local Coding Agent API")
     app.state.agent_state = state
 
     from .routes import register_routes
