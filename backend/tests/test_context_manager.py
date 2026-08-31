@@ -148,9 +148,43 @@ def test_context_compacts_old_turns_into_structured_memory() -> None:
     )
     assert context.stats.compaction_count >= 1
     assert context.stats.summary_chars > 0
-    assert context.last_change is not None
+    assert context.stats.compaction_count >= 1
     assert context.last_change.strategy == "deterministic_extractive_summary"
     assert any(message.content == "The latest task is still important" for message in messages)
+
+
+def test_context_compacts_old_verbose_tool_results_before_dropping_groups() -> None:
+    context = ContextManager("System", max_chars=5_000, max_tool_result_chars=4_000, recent_message_groups=1)
+    old_call = ToolCall(id="old", name="execute_command", arguments={"command": ["pytest"]})
+    context.add_user_message("Run the old check")
+    context.add_assistant_message(tool_calls=[old_call])
+    context.add_tool_result(
+        ToolResult(
+            tool_call_id="old",
+            tool_name="execute_command",
+            success=False,
+            output={"command": "pytest", "returncode": 1, "stdout": "failure details " * 200},
+            error="tests failed",
+        )
+    )
+    middle_call = ToolCall(id="middle", name="execute_command", arguments={"command": ["build"]})
+    context.add_user_message("Run the build")
+    context.add_assistant_message(tool_calls=[middle_call])
+    context.add_tool_result(
+        ToolResult(tool_call_id="middle", tool_name="execute_command", success=True, output={"command": "build", "stdout": "build output " * 200})
+    )
+    latest_call = ToolCall(id="latest", name="read_file", arguments={"path": "main.py"})
+    context.add_user_message("Inspect the latest file")
+    context.add_assistant_message(tool_calls=[latest_call])
+    context.add_tool_result(
+        ToolResult(tool_call_id="latest", tool_name="read_file", success=True, output={"path": "main.py"})
+    )
+
+    old_tool = next(message for message in context.get_messages() if message.tool_call_id == "old")
+    assert old_tool.content is not None
+    assert '"context_compacted": true' in old_tool.content
+    assert "failure details" in old_tool.content
+    assert context.stats.compaction_count >= 1
 
 
 def test_context_stats_report_message_and_tool_sizes() -> None:

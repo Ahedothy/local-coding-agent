@@ -13,6 +13,7 @@ from .messages import message_character_count
 
 
 TOOL_RESULT_TRUNCATION_MARKER = "\n... [tool result truncated]"
+OLD_TOOL_COMPACT_LIMIT = 2_400
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +249,17 @@ class ContextManager:
             self.last_change = None
             return False
 
+        compacted_tools = self._compact_old_tool_results()
+        if compacted_tools and self.total_chars <= self.max_chars:
+            self._compaction_count += 1
+            self.last_change = ContextChange(
+                before,
+                self.total_chars,
+                compacted_tools,
+                "compact_old_tool_results",
+            )
+            return True
+
         compacted = self._compact_old_groups() if self.enable_compaction else 0
         if compacted and self.total_chars <= self.max_chars:
             self._compaction_count += 1
@@ -296,10 +308,80 @@ class ContextManager:
         self.last_change = ContextChange(
             before,
             self.total_chars,
-            compacted or 1,
-            "summary_then_drop_old_groups" if compacted else "drop_old_groups",
+            compacted_tools + (compacted or 1),
+            "compact_tools_summary_then_drop_old_groups"
+            if compacted_tools and compacted
+            else "summary_then_drop_old_groups"
+            if compacted
+            else "compact_tools_then_drop_old_groups"
+            if compacted_tools
+            else "drop_old_groups",
         )
         return True
+
+    def _compact_old_tool_results(self) -> int:
+        """Shrink older verbose tool payloads before summarizing whole groups.
+
+        This is deliberately deterministic and provider-neutral. The compact
+        payload keeps fields useful for planning while discarding repetitive
+        stdout/stderr bodies that can be recovered by rerunning a command or
+        using the file tools. Messages marked ``context_compacted`` are skipped
+        so repeated budget passes are idempotent.
+        """
+        groups = self._message_groups()
+        if not groups:
+            return 0
+        recent = {
+            tuple(group)
+            for group in (groups[-self.recent_message_groups:] if self.recent_message_groups else [])
+        }
+        candidate_indices = {
+            index
+            for group in groups
+            if tuple(group) not in recent
+            for index in group
+            if self._messages[index].role == "tool"
+        }
+        changed = 0
+        for index in sorted(candidate_indices):
+            message = self._messages[index]
+            if len(message.content or "") <= OLD_TOOL_COMPACT_LIMIT:
+                continue
+            try:
+                payload = json.loads(message.content or "")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("context_compacted") is True:
+                continue
+            compacted = self._compact_tool_payload(payload)
+            if len(compacted) >= len(message.content or ""):
+                continue
+            self._messages[index] = message.model_copy(update={"content": compacted})
+            changed += 1
+        return changed
+
+    @staticmethod
+    def _compact_tool_payload(payload: dict[str, object]) -> str:
+        output = payload.get("output")
+        compact_output: dict[str, object] = {}
+        if isinstance(output, dict):
+            for key in ("path", "paths", "touched_files", "command", "returncode", "status", "sha256"):
+                if key in output:
+                    compact_output[key] = output[key]
+            for key in ("stdout", "stderr"):
+                value = output.get(key)
+                if value:
+                    text = str(value)
+                    compact_output[key] = text[:320] + ("…" if len(text) > 320 else "")
+        compact = {
+            "success": payload.get("success"),
+            "output": compact_output,
+            "error": str(payload.get("error"))[:500] if payload.get("error") else None,
+            "context_compacted": True,
+            "truncated": True,
+            "summary": "Older tool output compacted; rerun the command or read the file for full details.",
+        }
+        return json.dumps(compact, ensure_ascii=False, default=str)
 
     def _compact_old_groups(self) -> int:
         groups = self._message_groups()
