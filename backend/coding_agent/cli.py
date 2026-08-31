@@ -15,6 +15,7 @@ from uuid import uuid4
 from coding_agent.agent import Agent, Session
 from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
+from coding_agent.agent.instructions import load_workspace_instructions
 from coding_agent.events import AgentEvent, AgentEventType, JsonlEventLogger, SqliteRunStore
 from coding_agent.models import (
     ModelResponse,
@@ -595,14 +596,16 @@ def _build_agent(workspace: Workspace, provider, event_handler) -> Agent:
     )
     session = Session(workspace_root=workspace.root)
     tool_context = ToolContext(session_id=session.session_id, workspace=workspace)
+    workspace_instructions = load_workspace_instructions(workspace.root)
     executor = ToolExecutor(registry, event_handler=event_handler)
     return Agent(
         provider,
         executor,
-        ContextManager(SYSTEM_PROMPT),
+        ContextManager(SYSTEM_PROMPT + workspace_instructions.prompt_fragment()),
         session,
         tool_context=tool_context,
         event_handler=event_handler,
+        workspace_instructions=workspace_instructions,
     )
 
 

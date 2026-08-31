@@ -26,6 +26,7 @@ class AgentEventType(str, Enum):
     REFLECTION = "reflection"
     CONTEXT_TRUNCATED = "context_truncated"
     CONTEXT_COMPACTED = "context_compacted"
+    WORKSPACE_INSTRUCTIONS_LOADED = "workspace_instructions_loaded"
     VERIFICATION_UPDATED = "verification_updated"
     AGENT_FINISHED = "agent_finished"
     AGENT_ERROR = "agent_error"

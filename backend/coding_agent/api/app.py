@@ -13,6 +13,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, status
 
 from coding_agent.agent import Agent, AgentRunResult, Session, SessionStatus
+from coding_agent.agent.instructions import load_workspace_instructions
 from coding_agent.config import load_dotenv
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEvent, SqliteRunStore
@@ -144,15 +145,17 @@ def _default_agent_factory(
         (*FILESYSTEM_TOOLS, *INSPECTION_TOOLS, *ENVIRONMENT_TOOLS, ManageProcessTool(), *EDIT_TOOLS, *COMMAND_TOOLS)
     )
     session = Session(workspace_root=workspace.root)
+    workspace_instructions = load_workspace_instructions(workspace.root)
     tool_context = ToolContext(session_id=session.session_id, workspace=workspace)
     executor = ToolExecutor(registry, event_handler=event_handler)
     return Agent(
         OpenAICompatibleProvider(),
         executor,
-        ContextManager(SYSTEM_PROMPT),
+        ContextManager(SYSTEM_PROMPT + workspace_instructions.prompt_fragment()),
         session,
         tool_context=tool_context,
         event_handler=event_handler,
+        workspace_instructions=workspace_instructions,
     )
 
 

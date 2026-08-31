@@ -21,6 +21,7 @@ from coding_agent.workspace import Workspace
 from .session import Session, SessionStatus
 from .termination import AgentLimits, tool_call_signature
 from .verification import VerificationLedger
+from .instructions import WorkspaceInstructions
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
@@ -55,6 +56,7 @@ class Agent:
         tool_context: ToolContext | None = None,
         limits: AgentLimits | None = None,
         event_handler: EventHandler | None = None,
+        workspace_instructions: WorkspaceInstructions | None = None,
     ) -> None:
         self.model_provider = model_provider
         self.tool_executor = tool_executor
@@ -76,6 +78,7 @@ class Agent:
         self._turn_started_at: float | None = None
         self._turn_diffs: dict[str, str] = {}
         self.verification = VerificationLedger()
+        self.workspace_instructions = workspace_instructions
 
         if self.tool_executor.event_handler is None and event_handler is not None:
             self.tool_executor.event_handler = event_handler
@@ -145,6 +148,20 @@ class Agent:
                     payload={"workspace_root": str(self.tool_context.workspace.root)},
                 )
             )
+            instructions = self.workspace_instructions
+            if instructions is not None:
+                await self._emit(
+                    AgentEvent(
+                        type=AgentEventType.WORKSPACE_INSTRUCTIONS_LOADED,
+                        session_id=self.session.session_id,
+                        payload={
+                            "path": instructions.path,
+                            "found": instructions.found,
+                            "injected_chars": instructions.injected_chars,
+                            "truncated": instructions.truncated,
+                        },
+                    )
+                )
 
         if not user_message.strip():
             result = AgentRunResult(

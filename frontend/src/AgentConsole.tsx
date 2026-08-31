@@ -89,6 +89,7 @@ const eventLabels: Record<string, string> = {
   reflection: "检查结果",
   context_truncated: "整理上下文",
   context_compacted: "压缩上下文",
+  workspace_instructions_loaded: "已加载项目指令",
   verification_updated: "验证证据更新",
   agent_finished: "Agent 已完成",
   agent_error: "Agent 出错",
@@ -298,6 +299,13 @@ function activityPresentation(step: ActivityStep) {
   }
   if (event.type === "context_truncated") return { title: "上下文已整理", description: "已保留最近的关键信息。" };
   if (event.type === "context_compacted") return { title: "上下文已压缩", description: "已压缩对话内容，以控制输入长度。" };
+  if (event.type === "workspace_instructions_loaded") {
+    const found = event.payload.found === true;
+    const chars = Number(event.payload.injected_chars ?? 0);
+    const truncated = event.payload.truncated === true;
+    if (!found) return { title: "未找到项目指令", description: "工作区根目录没有 AGENTS.md。" };
+    return { title: "已加载项目指令", description: `已注入 AGENTS.md ${chars} 个字符${truncated ? "（内容已截断）" : ""}。` };
+  }
   if (event.type === "verification_updated") {
     const summary = objectValue(event.payload.verification);
     const status = typeof summary?.status === "string" ? summary.status : "";
@@ -385,7 +393,7 @@ function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
       }
       continue;
     }
-    if (event.type === "context_truncated" || event.type === "context_compacted" || event.type === "verification_updated" || event.type === "agent_error") {
+    if (event.type === "context_truncated" || event.type === "context_compacted" || event.type === "workspace_instructions_loaded" || event.type === "verification_updated" || event.type === "agent_error") {
       steps.push({ event, events: [event] });
       modelStep = undefined;
     }
@@ -433,6 +441,7 @@ const thinkingEventTypes = [
   "approval_resolved",
   "context_truncated",
   "context_compacted",
+  "workspace_instructions_loaded",
   "verification_updated",
   "agent_error",
 ];
