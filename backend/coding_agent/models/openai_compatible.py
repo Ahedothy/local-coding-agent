@@ -23,6 +23,11 @@ class ProviderConfigurationError(ValueError):
 class ModelProviderError(RuntimeError):
     """Raised when an API call or provider response cannot be normalized."""
 
+    def __init__(self, message: str, *, retryable: bool = False, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.reason = reason
+
 
 class OpenAICompatibleProvider:
     """Adapt an OpenAI-compatible Chat Completions API to ``ModelProvider``.
@@ -78,16 +83,38 @@ class OpenAICompatibleProvider:
         try:
             response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
-            raise ModelProviderError(f"model API request failed: {exc}") from exc
+            reason = _retry_reason(exc)
+            raise ModelProviderError(
+                f"model API request failed: {exc}",
+                retryable=reason is not None,
+                reason=reason,
+            ) from exc
 
         try:
             return _response_from_openai(response)
-        except ModelProviderError:
-            raise
+        except ModelProviderError as exc:
+            raise ModelProviderError(str(exc), retryable=True, reason="invalid_response") from exc
         except Exception as exc:
             raise ModelProviderError(
-                f"could not parse model API response: {exc}"
+                f"could not parse model API response: {exc}",
+                retryable=True,
+                reason="invalid_response",
             ) from exc
+
+
+def _retry_reason(exc: Exception) -> str | None:
+    """Classify transient provider failures without retrying bad requests."""
+    name = type(exc).__name__.casefold()
+    if "ratelimit" in name or "rate_limit" in name:
+        return "rate_limit_429"
+    if "connection" in name or "connect" in name or "reset" in name:
+        return "connection_error"
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and 500 <= status_code <= 599:
+        return f"temporary_server_error_{status_code}"
+    if "timeout" in name:
+        return "provider_timeout"
+    return None
 
 
 def _message_to_openai(message: ModelMessage) -> dict[str, Any]:

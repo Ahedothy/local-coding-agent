@@ -79,6 +79,7 @@ const eventLabels: Record<string, string> = {
   iteration_started: "开始处理",
   model_request: "模型请求",
   model_response: "模型响应",
+  model_retry_scheduled: "模型调用将重试",
   tool_started: "开始执行工具",
   tool_finished: "工具执行完成",
   tool_failed: "工具执行失败",
@@ -252,6 +253,13 @@ function activityPresentation(step: ActivityStep) {
     return toolCallCount > 0
       ? { title: "已选择操作", description: `已安排 ${toolCallCount} 个本地操作。` }
       : { title: "准备回复", description: "正在整理结果。" };
+  }
+  if (event.type === "model_retry_scheduled") {
+    const attempt = Number(event.payload.attempt ?? 0);
+    const reason = String(event.payload.reason ?? "临时错误");
+    const delay = Number(event.payload.delay_seconds ?? 0);
+    const reasonLabel = reason.includes("429") || reason.includes("rate") ? "请求频率受限" : reason.includes("connection") ? "网络连接暂时失败" : reason.includes("500") || reason.includes("server") ? "模型服务暂时不可用" : reason.includes("timeout") ? "模型响应超时" : "模型响应异常";
+    return { title: "模型调用将重试", description: `${reasonLabel}，第 ${attempt} 次尝试将在 ${delay.toFixed(1)} 秒后进行。` };
   }
   if (event.type === "plan") return { title: "计划", description: readPayloadString(event, "content") ?? "正在拆分任务步骤。" };
   if (event.type === "reflection") return { title: "检查结果", description: readPayloadString(event, "content") ?? "正在检查执行结果。" };
@@ -432,6 +440,7 @@ const thinkingEventTypes = [
   "iteration_started",
   "model_request",
   "model_response",
+  "model_retry_scheduled",
   "plan",
   "reflection",
   "tool_started",
@@ -852,6 +861,7 @@ export default function AgentConsole() {
   const [pendingApproval, setPendingApproval] = useState<AgentEvent | null>(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [revertedChanges, setRevertedChanges] = useState<Set<string>>(new Set());
+  const [unavailableChanges, setUnavailableChanges] = useState<Set<string>>(new Set());
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(270);
@@ -1093,6 +1103,7 @@ export default function AgentConsole() {
       setApprovalBusy(false);
       setThinkingExpanded(false);
       setRevertedChanges(new Set());
+      setUnavailableChanges(new Set());
       const loadedTurns = buildConversationTurns(cachedEvents);
       setInstantAnswerTurnKey(liveStatus === "running" ? null : loadedTurns.at(-1)?.key ?? null);
       const cachedFiles = workspaceFilesCache.current.get(projectKey(activated.workspace_root));
@@ -1158,6 +1169,7 @@ export default function AgentConsole() {
     setPendingApproval(null);
     setApprovalBusy(false);
     setRevertedChanges(new Set());
+    setUnavailableChanges(new Set());
     if (root) {
       await createSession(root, switchingProject);
       setProjectSwitching(false);
@@ -1183,6 +1195,7 @@ export default function AgentConsole() {
     setPendingApproval(null);
     setApprovalBusy(false);
     setRevertedChanges(new Set());
+    setUnavailableChanges(new Set());
     try {
       const response = await fetch(`${API_BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace_root: root }) });
       if (!response.ok) throw new Error(await responseError(response, "无法创建会话"));
@@ -1312,7 +1325,16 @@ export default function AgentConsole() {
         `${API_BASE}/sessions/${session.session_id}/changes/${changeId}/revert`,
         { method: "POST" },
       );
-       if (!response.ok) throw new Error(await responseError(response, "无法撤销修改"));
+       if (!response.ok) {
+        if (response.status === 409 || response.status === 404) {
+          // The file changed after the Agent edit (or the record is no longer
+          // available). Hide this action instead of leaving a misleading undo
+          // button that can never succeed.
+          setUnavailableChanges((current) => new Set(current).add(changeId));
+          return;
+        }
+        throw new Error(await responseError(response, "无法撤销修改"));
+      }
       setRevertedChanges((current) => new Set(current).add(changeId));
       await loadWorkspaceFiles(session.session_id);
       if (selectedFilePathRef.current) {
@@ -1519,7 +1541,8 @@ export default function AgentConsole() {
             const turnApproval = isLatestTurn ? [...turn.events].reverse().find((event) => event.type === "approval_requested") : undefined;
             const approvalId = turnApproval?.payload.approval_id;
             const approvalIsPending = Boolean(turnApproval && pendingApproval && approvalId === pendingApproval.payload.approval_id);
-            const changeIds = [...new Set(changeIdsForEvents(turn.events))];
+            const changeIds = [...new Set(changeIdsForEvents(turn.events))]
+              .filter((changeId) => !unavailableChanges.has(changeId));
             return <div className="conversation-turn" key={turn.key}>
               <article className="chat-message user-message"><div className="message-avatar user-avatar"><UserRound size={16} /></div><div className="message-body"><div className="message-meta"><strong>你</strong><time>{formatTime(turn.userEvent.timestamp)}</time></div><p>{readPayloadString(turn.userEvent, "content")}</p></div></article>
               {(turnActivitySteps.length > 0 || turnAnswer) && <article className="chat-message agent-message">
@@ -1533,7 +1556,7 @@ export default function AgentConsole() {
                   </details>}
                   {turnAnswer && <div className="answer-copy"><MarkdownAnswer content={turnAnswer} /><span className={`answer-cursor ${isLatestTurn && answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div>}
                   {showVerification && verification && <VerificationCard summary={verification} />}
-                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>文件修改</strong><small>上方显示修改内容。</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />已撤销修改</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />撤销修改</button>)}</div>}
+                  {changeIds.length > 0 && isLatestTurn && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>文件修改</strong><small>仅可撤销当前会话最新一轮修改。</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />已撤销修改</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />撤销修改</button>)}</div>}
                 </div>
               </article>}
             </div>;

@@ -16,6 +16,7 @@ class AgentLimits:
     max_total_tool_calls: int = 25
     max_tool_calls_per_iteration: int = 3
     max_consecutive_parse_errors: int = 2
+    max_model_retries: int = 2
     max_repeated_failed_tool_call: int = 2
     max_same_tool_call: int = 3
     task_timeout_seconds: float = 300.0
@@ -27,6 +28,7 @@ class AgentLimits:
             "max_total_tool_calls",
             "max_tool_calls_per_iteration",
             "max_consecutive_parse_errors",
+            "max_model_retries",
             "max_repeated_failed_tool_call",
             "max_same_tool_call",
         )

@@ -14,6 +14,7 @@ from typing import Any
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEvent, AgentEventType
 from coding_agent.models import ModelProvider, ModelRequest, ModelResponse
+from coding_agent.models.openai_compatible import ModelProviderError
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolResult
 from coding_agent.workspace import Workspace
@@ -260,20 +261,37 @@ class Agent:
             )
 
             model_started_at = time.monotonic()
-            try:
-                response = await asyncio.wait_for(
-                    self.model_provider.complete(request),
-                    timeout=self.limits.model_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                return self._failed(f"model call timed out after {self.limits.model_timeout_seconds} seconds")
-            except Exception as exc:
-                return self._failed(f"model provider error: {exc}")
+            response = None
+            max_model_attempts = self.limits.max_model_retries + 1
+            for attempt in range(1, max_model_attempts + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        self.model_provider.complete(request),
+                        timeout=self.limits.model_timeout_seconds,
+                    )
+                    break
+                except asyncio.TimeoutError as exc:
+                    reason = "model_timeout"
+                    if attempt >= max_model_attempts:
+                        return self._failed(f"model call timed out after {self.limits.model_timeout_seconds} seconds")
+                    await self._schedule_model_retry(iteration, attempt + 1, reason, 0.5 if attempt == 1 else 1.5)
+                    await asyncio.sleep(0.5 if attempt == 1 else 1.5)
+                except ModelProviderError as exc:
+                    if not exc.retryable or attempt >= max_model_attempts:
+                        return self._failed(f"model provider error: {exc}")
+                    delay = 0.5 if attempt == 1 else 1.5
+                    await self._schedule_model_retry(iteration, attempt + 1, exc.reason or "transient_provider_error", delay)
+                    await asyncio.sleep(delay)
+                except Exception as exc:
+                    return self._failed(f"model provider error: {exc}")
 
             if not isinstance(response, ModelResponse):
                 parse_errors += 1
                 if parse_errors >= self.limits.max_consecutive_parse_errors:
                     return self._failed("model returned an invalid response")
+                delay = 0.5
+                await self._schedule_model_retry(iteration, parse_errors + 1, "invalid_response", delay)
+                await asyncio.sleep(delay)
                 continue
 
             await self._emit(
@@ -433,6 +451,26 @@ class Agent:
                 "Please check the file and start the edit again."
             )
         return self._failed("maximum iterations exceeded")
+
+    async def _schedule_model_retry(
+        self,
+        iteration: int,
+        attempt: int,
+        reason: str,
+        delay_seconds: float,
+    ) -> None:
+        await self._emit(
+            AgentEvent(
+                type=AgentEventType.MODEL_RETRY_SCHEDULED,
+                session_id=self.session.session_id,
+                iteration=iteration,
+                payload={
+                    "attempt": attempt,
+                    "reason": reason,
+                    "delay_seconds": delay_seconds,
+                },
+            )
+        )
 
     def _record_verification(self, result: ToolResult, metadata: dict[str, Any]):
         """Record only evidence observed from a local command result."""

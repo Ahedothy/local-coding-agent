@@ -198,6 +198,19 @@ def test_provider_wraps_api_errors() -> None:
         complete(provider, ModelRequest())
 
 
+def test_provider_marks_rate_limit_as_retryable() -> None:
+    class RateLimitError(Exception):
+        pass
+
+    provider = make_provider(FakeCompletions(error=RateLimitError("429")))
+
+    with pytest.raises(ModelProviderError) as exc_info:
+        complete(provider, ModelRequest())
+
+    assert exc_info.value.retryable is True
+    assert exc_info.value.reason == "rate_limit_429"
+
+
 def test_provider_rejects_invalid_tool_arguments() -> None:
     response = {
         "choices": [

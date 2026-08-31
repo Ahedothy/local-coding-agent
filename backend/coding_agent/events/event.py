@@ -16,6 +16,7 @@ class AgentEventType(str, Enum):
     ITERATION_STARTED = "iteration_started"
     MODEL_REQUEST = "model_request"
     MODEL_RESPONSE = "model_response"
+    MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
     TOOL_FAILED = "tool_failed"

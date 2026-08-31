@@ -7,6 +7,7 @@ from coding_agent.agent import Agent, AgentLimits, Session, SessionStatus
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEventType
 from coding_agent.models import ModelResponse, MockModelProvider, ToolCall
+from coding_agent.models import ModelProviderError
 from coding_agent.tools import ToolExecutor, ToolRegistry
 from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
 
@@ -80,6 +81,38 @@ def test_agent_success_path_executes_tool_and_returns_final_answer(tmp_path: Pat
         event for event in events if event.type is AgentEventType.AGENT_FINISHED
     )
     assert isinstance(finished.payload["duration_seconds"], float)
+
+
+def test_agent_retries_transient_model_provider_error(tmp_path: Path) -> None:
+    agent, provider, events = make_agent(
+        tmp_path,
+        [
+            ModelProviderError("temporary outage", retryable=True, reason="temporary_server_error_503"),
+            ModelResponse(content="Recovered after a transient model error."),
+        ],
+    )
+
+    result = run(agent)
+
+    assert result.status == SessionStatus.COMPLETED
+    assert len(provider.requests) == 2
+    retry = next(event for event in events if event.type is AgentEventType.MODEL_RETRY_SCHEDULED)
+    assert retry.payload["attempt"] == 2
+    assert retry.payload["reason"] == "temporary_server_error_503"
+    assert retry.payload["delay_seconds"] == 0.5
+
+
+def test_agent_does_not_retry_non_retryable_provider_error(tmp_path: Path) -> None:
+    agent, provider, events = make_agent(
+        tmp_path,
+        [ModelProviderError("invalid api key", retryable=False, reason="authentication")],
+    )
+
+    result = run(agent)
+
+    assert result.status == SessionStatus.FAILED
+    assert len(provider.requests) == 1
+    assert not any(event.type is AgentEventType.MODEL_RETRY_SCHEDULED for event in events)
 
 
 def test_agent_emits_plan_then_reflection_for_nontrivial_tool_turn(
