@@ -12,6 +12,7 @@
 - **CLI 与 Web UI 两种体验**：CLI 适合快速、直接地处理本地任务；Web UI 以时间线、可折叠的 Agent 活动面板、diff 和审批卡片展示执行过程。
 - **多轮协作与历史回放**：一次会话可以连续追问；CLI 和 Web UI 共用本地 SQLite 历史，CLI 产生的运行记录可以在 Web UI 中回放并继续。
 - **可解释的 Agent 行为**：计划、工具活动、审批、错误和完成状态都以事件形式记录，便于用户理解运行过程，也便于测试和演示。
+- **乐观并发保护**：`read_file` 返回内容 SHA-256；编辑工具可携带 `expected_sha256`，若文件在读取后被 IDE、用户或其他进程更新，写入会在副作用发生前拒绝并要求重新读取，避免覆盖较新的修改。
 
 项目没有使用 LangChain、LangGraph、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架或 SDK。允许使用模型厂商的 API 客户端和原生 tool calling，但模型服务端不执行本项目的文件或命令工具。
 

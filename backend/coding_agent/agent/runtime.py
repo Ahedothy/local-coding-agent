@@ -7,7 +7,7 @@ import inspect
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +20,7 @@ from coding_agent.workspace import Workspace
 
 from .session import Session, SessionStatus
 from .termination import AgentLimits, tool_call_signature
+from .verification import VerificationLedger
 
 
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
@@ -34,6 +35,7 @@ class AgentRunResult:
     iterations: int = 0
     tool_calls: int = 0
     error: str | None = None
+    verification: dict[str, Any] = field(default_factory=dict)
 
 
 class _AgentCancelled(Exception):
@@ -73,6 +75,7 @@ class Agent:
         self._plan_emitted = False
         self._turn_started_at: float | None = None
         self._turn_diffs: dict[str, str] = {}
+        self.verification = VerificationLedger()
 
         if self.tool_executor.event_handler is None and event_handler is not None:
             self.tool_executor.event_handler = event_handler
@@ -96,6 +99,15 @@ class Agent:
             self._turn_index = max(0, int(raw_turn_index))
         except (TypeError, ValueError):
             self._turn_index = 0
+        if isinstance(state, dict):
+            self.verification = VerificationLedger.from_state(state.get("verification"))
+
+    def runtime_state(self) -> dict[str, Any]:
+        """Return bounded runtime state used by local history persistence."""
+        return {
+            "turn_index": self._turn_index,
+            "verification": self.verification.to_state(),
+        }
 
     async def run(self, task: str) -> AgentRunResult:
         """Run one task, preserving the historical one-shot API."""
@@ -196,6 +208,11 @@ class Agent:
         parse_errors = 0
         failed_call_counts: defaultdict[str, int] = defaultdict(int)
         same_call_counts: defaultdict[str, int] = defaultdict(int)
+        # A stale-file race can produce different tool-call signatures on each
+        # retry (for example, the model re-reads the file and changes the hash).
+        # Track the condition independently of the exact signature so the run
+        # stops with a useful explanation instead of exhausting iterations.
+        stale_file_failures = 0
 
         for iteration in range(1, self.limits.max_iterations + 1):
             self._check_cancelled()
@@ -309,6 +326,7 @@ class Agent:
                         final_answer=final_content,
                         iterations=self._iterations,
                         tool_calls=self._tool_calls,
+                        verification=self.verification.summary(),
                     )
                 parse_errors += 1
                 if parse_errors >= self.limits.max_consecutive_parse_errors:
@@ -326,12 +344,41 @@ class Agent:
                 self._tool_calls += 1
                 result = await self.tool_executor.execute(tool_call, self.tool_context)
                 await self._append_tool_result(result, iteration)
-                if result.success and isinstance(result.output, dict):
+                if isinstance(result.output, dict):
                     diff = result.output.get("diff")
-                    if isinstance(diff, str) and diff.strip():
+                    if result.success and isinstance(diff, str) and diff.strip():
                         change_id = result.metadata.get("change_id")
                         key = change_id if isinstance(change_id, str) else f"diff-{len(self._turn_diffs)}"
                         self._turn_diffs[key] = diff
+                        self.verification.mark_modified()
+                        await self._emit_verification_update(
+                            iteration,
+                            reason="workspace_modified",
+                        )
+
+                    verification = result.output.get("verification")
+                    if isinstance(verification, dict):
+                        evidence = self._record_verification(result, verification)
+                        if evidence is not None:
+                            await self._emit_verification_update(
+                                iteration,
+                                reason="command_completed",
+                                evidence=evidence.as_dict(),
+                            )
+
+                if not result.success and "stale file" in (result.error or ""):
+                    stale_file_failures += 1
+                    if stale_file_failures >= self.limits.max_same_tool_call:
+                        return self._failed(
+                            "file changed repeatedly while Agent was editing; "
+                            "stopped to avoid overwriting newer changes. "
+                            "Please check the file and start the edit again."
+                        )
+                elif result.success and result.metadata.get("change_id"):
+                    # A successful write means the race has been resolved for
+                    # the current run; subsequent stale failures are a new
+                    # incident rather than an extension of the old one.
+                    stale_file_failures = 0
 
                 if (
                     not result.success
@@ -362,7 +409,74 @@ class Agent:
             if self._tool_calls >= self.limits.max_total_tool_calls:
                 return self._failed("maximum total tool calls exceeded")
 
+        if stale_file_failures > 0:
+            return self._failed(
+                "file kept changing while Agent was editing; "
+                "stopped before overwriting newer content. "
+                "Please check the file and start the edit again."
+            )
         return self._failed("maximum iterations exceeded")
+
+    def _record_verification(self, result: ToolResult, metadata: dict[str, Any]):
+        """Record only evidence observed from a local command result."""
+        kind = metadata.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return None
+        output = result.output if isinstance(result.output, dict) else {}
+        return self.verification.record(
+            kind=kind,
+            command=(
+                [str(part) for part in output.get("command", [])]
+                if isinstance(output.get("command"), list)
+                else None
+            ),
+            criteria=(
+                [str(item) for item in metadata.get("criteria", [])]
+                if isinstance(metadata.get("criteria"), list)
+                else []
+            ),
+            success=result.success and output.get("returncode") == 0,
+            returncode=(
+                int(output["returncode"])
+                if isinstance(output.get("returncode"), int)
+                else None
+            ),
+            summary=self._verification_summary(result, output),
+            duration_seconds=(
+                float(output["duration_seconds"])
+                if isinstance(output.get("duration_seconds"), (int, float))
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _verification_summary(result: ToolResult, output: dict[str, Any]) -> str:
+        text = str(output.get("stdout") or output.get("stderr") or "").strip()
+        if text:
+            return text
+        if result.error:
+            return result.error
+        return f"command completed with returncode={output.get('returncode')}"
+
+    async def _emit_verification_update(
+        self,
+        iteration: int | None,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        await self._emit(
+            AgentEvent(
+                type=AgentEventType.VERIFICATION_UPDATED,
+                session_id=self.session.session_id,
+                iteration=iteration,
+                payload={
+                    "reason": reason,
+                    "evidence": evidence,
+                    "verification": self.verification.summary(),
+                },
+            )
+        )
 
     async def _append_tool_result(self, result: ToolResult, iteration: int) -> None:
         truncated = self.context_manager.add_tool_result(result)
@@ -411,6 +525,7 @@ class Agent:
     async def _finalize(self, result: AgentRunResult) -> AgentRunResult:
         self.session.status = SessionStatus.IDLE
         self.session.updated_at = datetime.now(timezone.utc)
+        result.verification = self.verification.summary()
         duration_seconds = (
             time.monotonic() - self._turn_started_at
             if self._turn_started_at is not None
@@ -441,6 +556,7 @@ class Agent:
                     "error": result.error,
                     "turn_index": self._turn_index,
                     "duration_seconds": duration_seconds,
+                    "verification": result.verification,
                 },
             )
         )

@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, StrictStr, field_validator
 
@@ -49,6 +49,35 @@ class ExecuteCommandArguments(BaseModel):
         gt=0,
         le=MAX_OUTPUT_CHARS,
     )
+    verification_kind: Literal[
+        "test",
+        "build",
+        "lint",
+        "typecheck",
+        "smoke",
+        "config",
+        "benchmark",
+        "scope",
+        "other",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Optional verification category. Set this when the command checks "
+            "the requested task, including when no test suite exists."
+        ),
+    )
+    verification_criteria: list[StrictStr] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Acceptance conditions this command is intended to check.",
+    )
+
+    @field_validator("verification_criteria")
+    @classmethod
+    def validate_verification_criteria(cls, value: list[str]) -> list[str]:
+        if any(len(item) > 240 for item in value):
+            raise ValueError("each verification criterion must be at most 240 characters")
+        return value
 
     @field_validator("command", mode="before")
     @classmethod
@@ -148,6 +177,15 @@ class ExecuteCommandTool(Tool):
         cwd = context.workspace.resolve_cwd(arguments.cwd)
         command = _normalize_local_windows_executable(arguments.command, cwd)
         started_at = time.monotonic()
+        verification = (
+            {
+                "kind": arguments.verification_kind,
+                "criteria": list(arguments.verification_criteria),
+            }
+            if arguments.verification_kind is not None
+            else None
+        )
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -174,6 +212,7 @@ class ExecuteCommandTool(Tool):
                     "executable_found": False,
                     "stdout_truncated": False,
                     "stderr_truncated": False,
+                    **({"verification": verification} if verification else {}),
                 },
             )
 
@@ -201,6 +240,7 @@ class ExecuteCommandTool(Tool):
                     "timed_out": True,
                     "stdout_truncated": stdout_truncated,
                     "stderr_truncated": stderr_truncated,
+                    **({"verification": verification} if verification else {}),
                 },
             )
         except asyncio.CancelledError:
@@ -228,6 +268,7 @@ class ExecuteCommandTool(Tool):
                 "timed_out": False,
                 "stdout_truncated": stdout_truncated,
                 "stderr_truncated": stderr_truncated,
+                **({"verification": verification} if verification else {}),
             },
         )
 

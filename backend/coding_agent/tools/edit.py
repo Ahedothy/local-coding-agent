@@ -10,9 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import BaseModel, Field
+import json
+
+from pydantic import BaseModel, Field, field_validator
 
 from .base import Tool, ToolContext, ToolResult
+from .file_version import ensure_expected_sha256, sha256_bytes
 
 
 MAX_EDIT_FILE_BYTES = 1024 * 1024
@@ -24,6 +27,12 @@ class ReplaceInFileArguments(BaseModel):
     old_text: str = Field(min_length=1)
     new_text: str
     expected_replacements: int = Field(default=1, gt=0, le=100)
+    expected_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        description="SHA-256 returned by a previous read of this file.",
+    )
 
 
 class ApplyPatchArguments(BaseModel):
@@ -42,6 +51,24 @@ class ApplyPatchArguments(BaseModel):
             "diff without writing files. Use this to diagnose uncertain patches."
         ),
     )
+    expected_sha256: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional path-to-SHA-256 map returned by previous read_file calls.",
+    )
+
+    @field_validator("expected_sha256", mode="before")
+    @classmethod
+    def decode_expected_sha256(cls, value: object) -> object:
+        """Accept JSON-encoded maps emitted by some tool-calling models."""
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("expected_sha256 must be a JSON object") from exc
+            if not isinstance(decoded, dict):
+                raise ValueError("expected_sha256 must be a JSON object")
+            return decoded
+        return value
 
 
 def _is_binary(path: Path) -> bool:
@@ -398,6 +425,7 @@ class ReplaceInFileTool(Tool):
         arguments: ReplaceInFileArguments,
     ) -> ToolResult:
         path = context.workspace.ensure_readable_file(arguments.path)
+        ensure_expected_sha256(path, arguments.expected_sha256, arguments.path)
         if _is_binary(path):
             raise ValueError(f"binary file is not supported: {arguments.path}")
         if path.stat().st_size > MAX_EDIT_FILE_BYTES:
@@ -419,6 +447,7 @@ class ReplaceInFileTool(Tool):
             )
         updated, replacement_count = replacement
         updated_bytes = updated.encode("utf-8")
+        ensure_expected_sha256(path, arguments.expected_sha256, arguments.path)
         _atomic_write_bytes(path, updated_bytes)
         lines_added, lines_removed = _line_delta(content, updated)
         diff = _build_unified_diff(
@@ -444,6 +473,7 @@ class ReplaceInFileTool(Tool):
                 "replacements": replacement_count,
                 "bytes_written": len(updated_bytes),
                 "diff": diff,
+                "sha256": sha256_bytes(updated_bytes),
             },
         )
 
@@ -490,6 +520,12 @@ class ApplyPatchTool(Tool):
                 if path.stat().st_size > MAX_EDIT_FILE_BYTES:
                     raise ValueError(f"file is too large to edit: {file_patch.path}")
                 original = path.read_bytes()
+                relative_path = _relative_path(context.workspace.root, path)
+                ensure_expected_sha256(
+                    path,
+                    arguments.expected_sha256.get(relative_path),
+                    relative_path,
+                )
                 content = original.decode("utf-8")
             except Exception as exc:
                 rejected_hunks.append({"path": file_patch.path, "reason": str(exc)})
@@ -586,6 +622,11 @@ class ApplyPatchTool(Tool):
         written: list[_PatchPlan] = []
         try:
             for plan in plans:
+                ensure_expected_sha256(
+                    plan.path,
+                    arguments.expected_sha256.get(plan.relative_path),
+                    plan.relative_path,
+                )
                 _atomic_write_bytes(plan.path, plan.updated)
                 written.append(plan)
         except Exception as exc:

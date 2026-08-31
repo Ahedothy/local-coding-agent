@@ -13,6 +13,7 @@ from coding_agent.tools.filesystem import (
     WriteFileTool,
 )
 from coding_agent.workspace import Workspace
+from coding_agent.tools.file_version import sha256_file
 
 
 def make_context(tmp_path: Path) -> ToolContext:
@@ -72,6 +73,7 @@ def test_read_file_supports_line_ranges_and_truncation(tmp_path: Path) -> None:
     assert result.success is True
     assert result.output["content"] == "two\nthree\n"
     assert result.output["truncated"] is False
+    assert result.output["sha256"] == sha256_file(tmp_path / "main.py")
 
 
 def test_read_file_rejects_binary_and_workspace_escape(tmp_path: Path) -> None:
@@ -146,6 +148,30 @@ def test_write_file_rejects_workspace_escape(tmp_path: Path) -> None:
 
     assert result.success is False
     assert "outside the workspace" in result.error
+
+
+def test_write_file_rejects_stale_expected_sha256_without_touching_file(tmp_path: Path) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("old\n", encoding="utf-8")
+    original = path.read_bytes()
+    result = asyncio.run(
+        filesystem_executor().execute(
+            ToolCall(
+                id="call-stale",
+                name="write_file",
+                arguments={
+                    "path": "main.py",
+                    "content": "new\n",
+                    "expected_sha256": "0" * 64,
+                },
+            ),
+            make_context(tmp_path),
+        )
+    )
+
+    assert result.success is False
+    assert "stale file" in result.error
+    assert path.read_bytes() == original
 
 
 def test_search_files_finds_text_and_respects_match_limit(tmp_path: Path) -> None:

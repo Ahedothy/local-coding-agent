@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from .base import Tool, ToolContext, ToolResult
+from .file_version import sha256_bytes
 
 
 MAX_READ_BYTES = 1024 * 1024
@@ -63,6 +64,12 @@ class WriteFileArguments(BaseModel):
     content: str = Field(max_length=MAX_WRITE_CHARS)
     overwrite: bool = True
     create_parent_dirs: bool = False
+    expected_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        description="SHA-256 returned by a previous read of this file.",
+    )
 
 
 class SearchFilesArguments(BaseModel):
@@ -239,6 +246,7 @@ class ReadFileTool(Tool):
             raise ValueError(f"binary file is not supported: {arguments.path}")
 
         text, byte_truncated = _read_text_limited(path, MAX_READ_BYTES)
+        original = path.read_bytes()
         lines = text.splitlines(keepends=True)
         start = arguments.start_line or 1
         end = arguments.end_line or len(lines)
@@ -255,6 +263,7 @@ class ReadFileTool(Tool):
                 "start_line": start,
                 "end_line": min(end, len(lines)),
                 "truncated": byte_truncated or char_truncated,
+                "sha256": sha256_bytes(original),
             },
         )
 
@@ -270,6 +279,9 @@ class WriteFileTool(Tool):
         arguments: WriteFileArguments,
     ) -> ToolResult:
         path = context.workspace.ensure_writable_file(arguments.path)
+        from .file_version import ensure_expected_sha256
+
+        ensure_expected_sha256(path, arguments.expected_sha256, arguments.path)
         if path.exists() and not arguments.overwrite:
             raise FileExistsError(f"file already exists: {arguments.path}")
 
@@ -280,12 +292,15 @@ class WriteFileTool(Tool):
                 raise FileNotFoundError(f"parent directory does not exist: {path.parent}")
             path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Recheck immediately before the side effect to narrow the race window.
+        ensure_expected_sha256(path, arguments.expected_sha256, arguments.path)
         path.write_text(arguments.content, encoding="utf-8")
         return _tool_success(
             self,
             {
                 "path": _relative_path(context.workspace.root, path),
                 "bytes_written": len(arguments.content.encode("utf-8")),
+                "sha256": sha256_bytes(arguments.content.encode("utf-8")),
             },
         )
 

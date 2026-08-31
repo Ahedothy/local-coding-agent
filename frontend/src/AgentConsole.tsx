@@ -59,12 +59,6 @@ type HistoryItem = {
   error?: string | null;
 };
 type HistoryRecord = { summary: HistoryItem; events: AgentEvent[] };
-type ContextStats = {
-  total_chars?: number;
-  max_chars?: number;
-  utilization?: number;
-  compaction_count?: number;
-};
 type FilePreview = { path: string; content: string; truncated?: boolean };
 type WorkspaceEntry = { path: string; kind: "file" | "directory" };
 type WorkspacePhase = "idle" | "selecting" | "loading";
@@ -82,7 +76,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const eventLabels: Record<string, string> = {
   session_started: "会话已创建",
   user_message: "用户消息",
-  iteration_started: "开始迭代",
+  iteration_started: "开始处理",
   model_request: "模型请求",
   model_response: "模型响应",
   tool_started: "开始执行工具",
@@ -92,9 +86,10 @@ const eventLabels: Record<string, string> = {
   approval_resolved: "审批已处理",
   assistant_message: "Agent 回复",
   plan: "计划",
-  reflection: "复盘",
-  context_truncated: "上下文裁剪",
-  context_compacted: "上下文压缩",
+  reflection: "检查结果",
+  context_truncated: "整理上下文",
+  context_compacted: "压缩上下文",
+  verification_updated: "验证证据更新",
   agent_finished: "Agent 已完成",
   agent_error: "Agent 出错",
 };
@@ -103,7 +98,7 @@ const eventTypes = Object.keys(eventLabels);
 const starterActions = [
   {
     id: "explore",
-    title: "探索代码项目",
+    title: "探索代码",
     description: "了解项目结构、入口和测试方式。",
     icon: FolderSearch,
     prompt:
@@ -128,7 +123,7 @@ const starterActions = [
   {
     id: "fix",
     title: "修复问题",
-    description: "复现失败，进行最小修改并验证结果。",
+    description: "定位问题，最小修改并验证。",
     icon: Bug,
     prompt:
       "请找出并修复这个项目当前失败的测试或 Bug。先检查相关代码，进行最小修改，然后运行完整的相关测试套件进行验证。",
@@ -139,7 +134,7 @@ function eventTone(type: string): "neutral" | "working" | "success" | "danger" {
   if (["tool_started", "model_request", "iteration_started"].includes(type)) return "working";
   if (type === "approval_requested") return "working";
   if (type === "plan") return "working";
-  if (["tool_finished", "agent_finished", "context_compacted", "approval_resolved"].includes(type)) return "success";
+  if (["tool_finished", "agent_finished", "context_compacted", "approval_resolved", "verification_updated"].includes(type)) return "success";
   if (["tool_failed", "agent_error"].includes(type)) return "danger";
   return "neutral";
 }
@@ -189,7 +184,7 @@ function formatDuration(events: AgentEvent[]) {
 
 function runStatusLabel(status: string) {
   const labels: Record<string, string> = {
-    "workspace-required": "需要工作区",
+    "workspace-required": "请选择项目",
     running: "执行中",
     ready: "就绪",
     completed: "已完成",
@@ -206,16 +201,16 @@ function readPayloadString(event: AgentEvent, key: string) {
 
 function toolDisplayName(toolName: unknown) {
   const names: Record<string, string> = {
-    list_files: "查看工作区",
+    list_files: "浏览文件",
     read_file: "读取文件",
-    write_file: "创建或更新文件",
-    replace_in_file: "更新文件",
-    apply_patch: "应用代码修改",
-    execute_command: "运行本地命令",
-    search_files: "搜索工作区",
+    write_file: "写入文件",
+    replace_in_file: "替换文件内容",
+    apply_patch: "应用修改",
+    execute_command: "运行命令",
+    search_files: "搜索代码",
     get_file_info: "查看文件信息",
-    list_directory_tree: "查看工作区树",
-    git_diff: "查看工作区修改",
+    list_directory_tree: "查看目录结构",
+    git_diff: "查看代码变更",
   };
   const rawName = typeof toolName === "string" && toolName ? toolName : "本地工具";
   return names[rawName] ?? `未知工具（${rawName.replaceAll("_", " ")}）`;
@@ -223,6 +218,21 @@ function toolDisplayName(toolName: unknown) {
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function isIgnorableGitDiffFailure(event: AgentEvent) {
+  if (event.type !== "tool_failed" || event.payload.tool_name !== "git_diff") return false;
+  const output = objectValue(event.payload.output);
+  if (output?.repository === false) return true;
+  const error = readPayloadString(event, "error") ?? "";
+  return /not\s+(?:a\s+)?git\s+repository|git executable is not available/i.test(error);
+}
+
+function isHiddenVerificationEvent(event: AgentEvent) {
+  if (event.type !== "verification_updated") return false;
+  const summary = objectValue(event.payload.verification);
+  const status = typeof summary?.status === "string" ? summary.status : "";
+  return status === "unverified" || status === "not_required";
 }
 
 function activityOutput(step: ActivityStep) {
@@ -234,21 +244,21 @@ function activityPresentation(step: ActivityStep) {
   const event = step.event;
   const output = activityOutput(step);
   const toolName = toolDisplayName(event.payload.tool_name);
-  if (event.type === "iteration_started") return { title: `第 ${event.iteration ?? ""} 步`.trim(), description: "正在选择下一步操作。" };
-  if (event.type === "model_request") return { title: "分析任务", description: "正在准备下一步操作。" };
+  if (event.type === "iteration_started") return { title: `第 ${event.iteration ?? ""} 步`.trim(), description: "正在规划下一步。" };
+  if (event.type === "model_request") return { title: "分析任务", description: "正在生成下一步操作。" };
   if (event.type === "model_response") {
     const toolCallCount = Number(event.payload.tool_call_count ?? 0);
     return toolCallCount > 0
-      ? { title: "已选择操作", description: `已排队 ${toolCallCount} 个本地操作。` }
-      : { title: "准备回复", description: "任务处理完成，正在准备最终回复。" };
+      ? { title: "已选择操作", description: `已安排 ${toolCallCount} 个本地操作。` }
+      : { title: "准备回复", description: "正在整理结果。" };
   }
-  if (event.type === "plan") return { title: "计划", description: readPayloadString(event, "content") ?? "正在把工作组织成多个步骤。" };
-  if (event.type === "reflection") return { title: "检查结果", description: readPayloadString(event, "content") ?? "正在检查最新执行结果。" };
+  if (event.type === "plan") return { title: "计划", description: readPayloadString(event, "content") ?? "正在拆分任务步骤。" };
+  if (event.type === "reflection") return { title: "检查结果", description: readPayloadString(event, "content") ?? "正在检查执行结果。" };
   if (event.type === "tool_started" || event.type === "tool_finished") {
     if (event.payload.tool_name === "execute_command" && typeof output?.command === "string") return { title: toolName, description: output.command };
     if (typeof output?.path === "string") return { title: toolName, description: output.path };
     if (Array.isArray(output?.touched_files)) return { title: toolName, description: `已在本地更新 ${output.touched_files.length} 个文件。` };
-    return { title: event.type === "tool_started" ? toolName : `${toolName}已完成`, description: event.type === "tool_started" ? "正在你的本地工作区中执行。" : "本地操作已成功完成。" };
+    return { title: event.type === "tool_started" ? toolName : `${toolName}已完成`, description: event.type === "tool_started" ? "正在工作区中执行。" : "操作已完成。" };
   }
   if (event.type === "tool_failed") {
     const error = readPayloadString(event, "error") ?? "本地操作未能完成。";
@@ -260,7 +270,9 @@ function activityPresentation(step: ActivityStep) {
         ? { title: "补丁行数需要修正", description: "@@ 头部的行数与修改块不匹配。旧行数=上下文行+删除行，新行数=上下文行+新增行。Agent 应重新生成修改块。" }
       : error.includes("invalid unified diff")
         ? { title: "需要重新生成补丁", description: "补丁格式无效。Agent 应重新读取文件并生成新的补丁。" }
-        : { title: `${toolName}需要处理`, description: error };
+      : error.includes("stale file")
+        ? { title: "文件已被更新", description: "文件在 Agent 读取后发生了变化。请重新读取最新内容，再生成修改。" }
+        : { title: `${toolName}失败`, description: error };
   }
   if (event.type === "approval_requested") {
     if (event.payload.automatic === true && event.payload.approval_scope === "session") {
@@ -268,14 +280,14 @@ function activityPresentation(step: ActivityStep) {
     }
     return event.payload.automatic === true
       ? { title: "已自动批准", description: "当前操作已被本条消息的审批范围覆盖。" }
-      : { title: "需要审批", description: "本地修改或命令执行前正在等待你的批准。" };
+      : { title: "需要审批", description: "文件修改或命令执行前需要你的确认。" };
   }
   if (event.type === "approval_resolved") {
     const decision = readPayloadString(event, "decision");
     if (decision === "approved" && event.payload.automatic === true) {
       return event.payload.approval_scope === "session"
-        ? { title: "已自动批准", description: "会话级自动批准已启用，操作已自动放行。" }
-        : { title: "已自动批准", description: "操作已针对本条消息自动放行。" };
+        ? { title: "已自动批准", description: "已启用会话级自动批准。" }
+        : { title: "已自动批准", description: "已对本条消息自动放行。" };
     }
     if (decision === "approved" && event.payload.approval_scope === "current_turn") {
       return { title: "已批准本条消息", description: "本次审批覆盖当前消息剩余的本地操作。" };
@@ -284,9 +296,26 @@ function activityPresentation(step: ActivityStep) {
       ? { title: "审批通过", description: "本地操作可以继续执行。" }
       : { title: "审批拒绝", description: "本地操作已被你的决定拦截。" };
   }
-  if (event.type === "context_truncated") return { title: "上下文已裁剪", description: "保留最相关的对话信息。" };
-  if (event.type === "context_compacted") return { title: "记忆已压缩", description: "已压缩对话上下文，以控制模型输入预算。" };
-  if (event.type === "agent_error") return { title: "执行已停止", description: readPayloadString(event, "error") ?? "Agent 未能完成此任务。" };
+  if (event.type === "context_truncated") return { title: "上下文已整理", description: "已保留最近的关键信息。" };
+  if (event.type === "context_compacted") return { title: "上下文已压缩", description: "已压缩对话内容，以控制输入长度。" };
+  if (event.type === "verification_updated") {
+    const summary = objectValue(event.payload.verification);
+    const status = typeof summary?.status === "string" ? summary.status : "";
+    const labels: Record<string, string> = {
+      verified: "验证通过",
+      partially_verified: "部分验证",
+      unverified: "尚未验证",
+      not_required: "无需验证",
+    };
+    return { title: labels[status] ?? "验证状态更新", description: `工作区版本 v${String(summary?.workspace_version ?? "?")} 的证据账本已更新。` };
+  }
+  if (event.type === "agent_error") {
+    const error = readPayloadString(event, "error") ?? "任务未完成。";
+    if (error.includes("file changed repeatedly") || error.includes("file kept changing")) {
+      return { title: "文件持续变化，已停止", description: "为避免覆盖更新后的内容，Agent 已停止。请检查文件后重新发起修改。" };
+    }
+    return { title: "执行已停止", description: error };
+  }
   return { title: eventLabels[event.type] ?? "Agent 活动", description: "Agent 状态已更新。" };
 }
 
@@ -356,7 +385,7 @@ function buildActivitySteps(events: AgentEvent[]): ActivityStep[] {
       }
       continue;
     }
-    if (event.type === "context_truncated" || event.type === "context_compacted" || event.type === "agent_error") {
+    if (event.type === "context_truncated" || event.type === "context_compacted" || event.type === "verification_updated" || event.type === "agent_error") {
       steps.push({ event, events: [event] });
       modelStep = undefined;
     }
@@ -404,6 +433,7 @@ const thinkingEventTypes = [
   "approval_resolved",
   "context_truncated",
   "context_compacted",
+  "verification_updated",
   "agent_error",
 ];
 
@@ -431,12 +461,69 @@ function finalAnswerForEvents(events: AgentEvent[]) {
   return event ? readPayloadString(event, "content") : undefined;
 }
 
+function verificationForEvents(events: AgentEvent[]) {
+  const event = [...events].reverse().find((candidate) => candidate.type === "verification_updated" || candidate.type === "agent_finished");
+  return event ? objectValue(event.payload.verification) : undefined;
+}
+
+function verificationStatusLabel(status: unknown) {
+  const labels: Record<string, string> = {
+    verified: "已验证",
+    partially_verified: "部分验证",
+    unverified: "未验证",
+    not_required: "无需验证",
+  };
+  return typeof status === "string" ? labels[status] ?? status : "未验证";
+}
+
+function verificationKindLabel(kind: unknown) {
+  const labels: Record<string, string> = {
+    test: "测试",
+    build: "构建",
+    lint: "Lint",
+    typecheck: "类型检查",
+    smoke: "Smoke Test",
+    config: "配置检查",
+    benchmark: "基准检查",
+    scope: "范围检查",
+    other: "其他检查",
+  };
+  return typeof kind === "string" ? labels[kind] ?? kind : "验证";
+}
+
+function VerificationCard({ summary }: { summary: Record<string, unknown> }) {
+  const status = typeof summary.status === "string" ? summary.status : "unverified";
+  const workspaceVersion = typeof summary.workspace_version === "number" ? summary.workspace_version : 0;
+  const evidence = (Array.isArray(summary.evidence) ? summary.evidence : []).filter((item) => {
+    const entry = objectValue(item);
+    return entry?.workspace_version === workspaceVersion;
+  });
+  const currentCount = typeof summary.current_evidence_count === "number" ? summary.current_evidence_count : 0;
+  return <section className={`verification-card verification-${status}`} aria-label="验证证据">
+    <div className="verification-card-header">
+      <div className="verification-card-title"><ShieldCheck size={15} /><strong>验证证据</strong><span className="verification-status-chip">{verificationStatusLabel(status)}</span></div>
+      <span className="verification-version">工作区 v{String(summary.workspace_version ?? 0)}</span>
+    </div>
+    <p className="verification-card-summary">当前版本有 {currentCount} 条有效验证证据。</p>
+    {evidence.length > 0 && <div className="verification-evidence-list">{evidence.slice(-5).reverse().map((item, index) => {
+      const entry = objectValue(item);
+      if (!entry) return null;
+      const success = entry.success === true;
+      const criteria = Array.isArray(entry.criteria) ? entry.criteria.filter((value): value is string => typeof value === "string") : [];
+      const command = Array.isArray(entry.command) ? entry.command.filter((value): value is string => typeof value === "string").join(" ") : "";
+      return <div className={`verification-evidence ${success ? "is-success" : "is-failed"}`} key={typeof entry.evidence_id === "string" ? entry.evidence_id : `${index}`}>
+        <span className="verification-evidence-icon">{success ? <CheckCircle2 size={13} /> : <ShieldX size={13} />}</span>
+        <div className="verification-evidence-body"><div><strong>{verificationKindLabel(entry.kind)}</strong><span>工作区 v{String(entry.workspace_version ?? "?")}</span></div>{command && <code>{command}</code>}<small>{criteria.length > 0 ? criteria.join("；") : String(entry.summary ?? "")}</small></div>
+      </div>;
+    })}</div>}
+  </section>;
+}
+
 function conversationStats(events: AgentEvent[]) {
   return {
     duration: formatDuration(events),
     iterations: new Set(events.map((event) => event.iteration).filter((iteration): iteration is number => iteration !== null)).size,
     tools: events.filter((event) => event.type === "tool_started").length,
-    failures: events.filter((event) => event.type === "tool_failed").length,
   };
 }
 
@@ -760,6 +847,7 @@ export default function AgentConsole() {
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(270);
   const [rightWidth, setRightWidth] = useState(360);
+  const [workspacePanelRatio, setWorkspacePanelRatio] = useState(0.52);
   const eventSource = useRef<EventSource | null>(null);
   const activeStreamRunId = useRef<string | null>(null);
   const activeSessionId = useRef<string | null>(null);
@@ -784,10 +872,6 @@ export default function AgentConsole() {
     activeSessionId.current = session?.session_id ?? null;
   }, [session]);
 
-  const contextStats = useMemo(() => {
-    const candidate = [...events].reverse().find((event) => typeof event.payload.context === "object");
-    return candidate?.payload.context as ContextStats | undefined;
-  }, [events]);
   const conversationTurns = useMemo(() => buildConversationTurns(events), [events]);
   const projectGroups = useMemo(() => {
     const groups = new Map<string, { key: string; root: string; name: string; items: HistoryItem[] }>();
@@ -1123,7 +1207,7 @@ export default function AgentConsole() {
     }
     setAnswerStreaming(false);
     setInstantAnswerTurnKey(latestTurn?.key ?? null);
-    setThinkingExpanded(true);
+    // Start each run collapsed; approval requests still expand the panel.
     setBusy(true);
     eventSource.current?.close();
     activeStreamRunId.current = null;
@@ -1133,6 +1217,10 @@ export default function AgentConsole() {
       const started = (await response.json()) as RunResponse;
       setTask("");
       setRun(started);
+      // Apply the new turn and its collapsed default in the same React update
+      // window. This prevents the previous turn from briefly collapsing before
+      // the optimistic user message becomes the latest turn.
+      setThinkingExpanded(false);
       const optimisticUserEvent: AgentEvent = {
         event_id: `optimistic-user-${started.run_id}`,
         type: "user_message",
@@ -1342,6 +1430,25 @@ export default function AgentConsole() {
     window.addEventListener("pointerup", stop, { once: true });
   }
 
+  function resizeRailSections(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const rail = event.currentTarget.parentElement;
+    if (!rail) return;
+    const bounds = rail.getBoundingClientRect();
+    const update = (clientY: number) => {
+      const ratio = (clientY - bounds.top) / bounds.height;
+      setWorkspacePanelRatio(Math.min(0.78, Math.max(0.24, ratio)));
+    };
+    update(event.clientY);
+    const onMove = (moveEvent: PointerEvent) => update(moveEvent.clientY);
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
+
   useEffect(() => {
     if (!session || !busy) return;
     const timer = window.setInterval(() => {
@@ -1353,39 +1460,50 @@ export default function AgentConsole() {
   const layoutStyle = {
     "--left-pane-width": leftCollapsed ? "38px" : `${leftWidth}px`,
     "--right-pane-width": rightCollapsed ? "38px" : `${rightWidth}px`,
+    "--workspace-panel-height": `${workspacePanelRatio * 100}%`,
   } as CSSProperties;
 
   return <div className="console-shell">
     <header className="console-topbar">
-      <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">自托管运行时控制台</p></div></div>
+      <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">本地项目编程助手</p></div></div>
       <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "执行中" : session ? "会话就绪" : "需要选择项目"}</div>
     </header>
 
     <main className="console-layout" style={layoutStyle}>
       {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="项目面板已折叠"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="显示项目" aria-label="显示项目"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="项目和运行控制">
         <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">项目</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="选择其他项目" aria-label="切换项目" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="隐藏项目面板" aria-label="隐藏项目面板"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
-        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />正在选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />正在加载项目…</> : <><FolderOpen size={16} />选择项目</>}</button> : <div className="session-bar"><span title={`本地路径：${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
+        {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />正在加载项目…</> : <><FolderOpen size={16} />选择项目</>}</button> : <div className="session-bar"><span title={`本地路径：${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
         {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>尚未选择项目</strong><small>选择一个本地项目开始使用。</small></span></div>}
-        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "正在切换项目…" : "正在扫描项目…"}</span></div>}
+        {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "正在切换项目…" : "正在读取项目…"}</span></div>}
         {workspaceFiles.length > 0 && <div className="workspace-tree"><div className="tree-caption">{workspaceFiles.filter((entry) => entry.kind === "file").length} 个文件 · {workspaceFiles.filter((entry) => entry.kind === "directory").length} 个文件夹</div>{workspaceFiles.filter((entry) => !entry.path.includes("/")).sort((left, right) => Number(right.kind === "directory") - Number(left.kind === "directory") || left.path.localeCompare(right.path)).slice(0, 120).map((entry) => renderTreeEntry(entry))}{workspaceFiles.length > 120 && <div className="tree-more">仅显示前 120 项</div>}</div>}
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
-        {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>工作区为空</strong><small>此文件夹中没有可见的文件或文件夹。</small></span></div>}
+        {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>工作区为空</strong><small>此文件夹中没有可显示的内容。</small></span></div>}
         </>}</div>
-        <div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">会话</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="开始新会话"><SquarePen size={14} /><span>新建</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">正在加载会话…</p> : history.length === 0 ? <p className="history-empty">暂无会话。</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `本地路径：${group.root}` : "项目路径不可用"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} 个会话</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "新会话"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time><span>{formatHistoryDate(item.started_at)}</span>{item.turn_count && item.turn_count > 1 && <small>{item.turn_count} 轮</small>}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
+        <div className="rail-resizer" onPointerDown={resizeRailSections} role="separator" aria-label="调整项目和会话面板高度" title="上下拖动调整面板高度"><span /></div><div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">会话</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="开始新会话"><SquarePen size={14} /><span>新建</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">正在加载会话…</p> : history.length === 0 ? <p className="history-empty">暂无会话。</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `本地路径：${group.root}` : "项目路径不可用"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} 个会话</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "新会话"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time>{formatHistoryDate(item.started_at)}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
         </aside>}
       <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="调整工作区面板宽度"></div>
 
       <section className="trace-workbench" aria-label="Agent 对话">
-        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">对话</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{runStatusLabel(runStatus)}</div></div></div><div className="workbench-heading-actions"><div className="context-budget-compact" title="当前上下文使用情况"><span>上下文</span><strong>{contextStats ? `${contextStats.total_chars ?? 0} / ${contextStats.max_chars ?? 0}` : "--"}</strong><div className="budget-track"><span style={{ width: `${Math.min(100, (contextStats?.utilization ?? 0) * 100)}%` }} /></div></div></div></div>
+        <div className="workbench-heading"><div className="conversation-heading-main"><div className="conversation-title-row"><div className="section-kicker">对话</div><div className={`conversation-status status-${runStatus}`}><span className="status-chip-dot" />{runStatusLabel(runStatus)}</div></div></div></div>
 
         <div className="conversation-scroll" ref={conversationRef} aria-live="polite">
           {conversationTurns.map((turn) => {
-            const turnThinkingEvents = turn.events.filter((event) => thinkingEventTypes.includes(event.type));
-            const turnActivitySteps = buildActivitySteps(turnThinkingEvents);
+            const turnThinkingEvents = turn.events.filter((event) => thinkingEventTypes.includes(event.type) && !isHiddenVerificationEvent(event));
+            const ignoredGitDiffCallIds = new Set(turnThinkingEvents.filter(isIgnorableGitDiffFailure).map((event) => event.payload.tool_call_id).filter((value): value is string => typeof value === "string"));
+            const visibleThinkingEvents = turnThinkingEvents.filter((event) => !isIgnorableGitDiffFailure(event) && !(event.type === "tool_started" && ignoredGitDiffCallIds.has(String(event.payload.tool_call_id))));
+            const turnActivitySteps = buildActivitySteps(visibleThinkingEvents);
             const turnFinalAnswer = finalAnswerForEvents(turn.events);
             const isLatestTurn = turn.key === latestTurn?.key;
             const turnBusy = isLatestTurn && busy;
             const turnAnswer = isLatestTurn && answerStreaming ? displayedAnswer : turnFinalAnswer;
+            const verification = verificationForEvents(turn.events);
+            const showVerification = Boolean(
+              verification
+              && (verification.status === "verified" || verification.status === "partially_verified")
+              && turnFinalAnswer
+              && !turnBusy
+              && (!isLatestTurn || !answerStreaming),
+            );
             const hasAgentError = turnThinkingEvents.some((event) => event.type === "agent_error");
             const stats = conversationStats(turn.events);
             const turnActiveTool = isLatestTurn ? activeToolForEvents(turn.events) : undefined;
@@ -1398,29 +1516,30 @@ export default function AgentConsole() {
               {(turnActivitySteps.length > 0 || turnAnswer) && <article className="chat-message agent-message">
                 <div className="message-avatar agent-avatar"><Bot size={16} /></div>
                 <div className="message-body">
-                  <div className="message-meta"><strong>Agent</strong><time>{turnBusy ? "执行中" : turnFinalAnswer ? "最终回复" : "活动"}</time><span className="message-stats"><span><Clock3 size={11} />{stats.duration}</span><span>{stats.iterations || 0} 步</span><span>{stats.tools || 0} 个工具</span>{stats.failures > 0 && <span className="message-stats-danger">{stats.failures} 次失败</span>}</span></div>
+                  <div className="message-meta"><strong>Agent</strong><time>{turnBusy ? "执行中" : turnFinalAnswer ? "最终回复" : "活动"}</time><span className="message-stats"><span><Clock3 size={11} />{stats.duration}</span><span>{stats.iterations || 0} 步</span><span>{stats.tools || 0} 个工具</span></span></div>
                   {approvalIsPending && pendingApproval && <ApprovalCard approval={pendingApproval} busy={approvalBusy} onDecide={(approved, approveCurrentTurn) => void decideApproval(approved, approveCurrentTurn)} />}
                   {turnActivitySteps.length > 0 && <details className="thinking-inline" open={isLatestTurn ? thinkingExpanded : expandedActivityTurns.has(turn.key)} onToggle={(event) => { const open = event.currentTarget.open; if (isLatestTurn) setThinkingExpanded(open); else setExpandedActivityTurns((current) => { const next = new Set(current); if (open) next.add(turn.key); else next.delete(turn.key); return next; }); }}>
                     <summary><span className="thinking-summary-main"><span className="thinking-avatar"><BrainCircuit size={16} /></span><span><strong>{turnBusy ? "Agent 活动" : "Agent 活动已完成"}</strong><small>{turnBusy ? (turnActiveTool ? `正在${toolDisplayName(turnActiveTool)}` : "正在处理任务") : `${turnActivitySteps.length} 个活动步骤`}</small></span></span><span className="thinking-summary-state">{turnBusy ? <LoaderCircle className="spin" size={15} /> : hasAgentError ? <XCircle size={15} /> : <CheckCircle2 size={15} />}</span></summary>
                     <div className="thinking-steps">{turnActivitySteps.map((step) => { const presentation = activityPresentation(step); return <div className={`thinking-step tone-${eventTone(step.event.type)}`} key={step.events[0].event_id}><span className="thinking-step-icon">{step.event.type.startsWith("tool") ? <Wrench size={14} /> : iconForEvent(step.event.type)}</span><div className="thinking-step-body"><div className="thinking-step-title"><strong>{presentation.title}</strong><time>{formatTime(step.event.timestamp)}</time></div><p>{presentation.description}</p><details className="thinking-payload"><summary>执行详情</summary><dl className="execution-details">{activityDetails(step).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></details></div></div>; })}</div>
                   </details>}
                   {turnAnswer && <div className="answer-copy"><MarkdownAnswer content={turnAnswer} /><span className={`answer-cursor ${isLatestTurn && answerStreaming ? "is-visible" : ""}`} aria-hidden="true" /></div>}
-                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>本地修改</strong><small>上方包含统一 diff。</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />已撤销修改</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />撤销修改</button>)}</div>}
+                  {showVerification && verification && <VerificationCard summary={verification} />}
+                  {changeIds.length > 0 && turnFinalAnswer && !turnBusy && <div className="changes-actions"><span><strong>文件修改</strong><small>上方显示修改内容。</small></span>{changeIds.map((changeId) => revertedChanges.has(changeId) ? <span className="change-reverted" key={changeId}><CheckCircle2 size={14} />已撤销修改</span> : <button className="undo-button" key={changeId} onClick={() => void revertChange(changeId)}><RotateCcw size={14} />撤销修改</button>)}</div>}
                 </div>
               </article>}
             </div>;
           })}
           {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />正在准备活动</div>}
-        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>请先选择项目</h3><p>选择一个本地项目，以启用文件工具和命令。</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />正在选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />正在加载项目…</> : <><FolderOpen size={14} />选择项目</>}</button></div>}
+        {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>请先选择项目</h3><p>选择本地项目后即可使用文件和命令工具。</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />正在加载项目…</> : <><FolderOpen size={14} />选择项目</>}</button></div>}
           {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>你想从哪里开始？</h3><p>选择一个起点，或在下方描述自己的任务。</p><div className="starter-grid">{starterActions.map((action) => { const Icon = action.icon; return <button type="button" className="starter-card" key={action.id} onClick={() => chooseStarterPrompt(action.prompt)} disabled={busy || workspacePhase !== "idle"}><Icon size={17} /><span><strong>{action.title}</strong><small>{action.description}</small></span></button>; })}</div></div>}
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
 
-        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>自动批准本地操作</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "已对发送的消息启用" : "手动审批"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">给 Agent 发送消息</label><div className="composer-input-shell"><textarea ref={taskInputRef} id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="给 Agent 发送消息。按 Enter 发送，按 Ctrl+Enter 换行。" placeholder={session ? "让 Agent 检查、修改并验证你的工作区…" : "选择工作区后即可使用本地 Agent 工具…"} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "取消 Agent 执行" : "发送消息"} title={busy ? "取消 Agent 执行" : "发送消息"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "取消" : "发送"}</button></div></div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>自动批准本地操作</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "本条消息自动批准" : "需要手动审批"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">给 Agent 发送消息</label><div className="composer-input-shell"><textarea ref={taskInputRef} id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="给 Agent 发送消息。按 Enter 发送，按 Ctrl+Enter 换行。" placeholder={session ? "让 Agent 检查、修改并验证你的工作区…" : "选择工作区后即可使用本地 Agent 工具…"} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "取消 Agent 执行" : "发送消息"} title={busy ? "取消 Agent 执行" : "发送消息"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "取消" : "发送"}</button></div></div>
       </section>
 
       <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="调整文件预览面板宽度"></div>
-      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="文件预览面板已折叠"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="显示预览" aria-label="显示预览"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="文件预览"><div className="preview-heading"><div><div className="section-kicker">文件预览</div><h3>{filePreview?.path ?? selectedFilePath ?? "暂无文件"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="隐藏预览面板" aria-label="隐藏预览面板"><ChevronRight size={15} /></button></span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>正在加载预览…</p><span>正在读取选中的本地文件。</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>无法预览</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>文件预览失败</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>选择文件夹后，点击左侧工作区树中的文件即可预览。</p></div>}</aside>}
+      {rightCollapsed ? <aside className="file-preview-panel collapsed-pane" aria-label="文件预览面板已折叠"><button className="collapsed-pane-button" onClick={() => setRightCollapsed(false)} title="显示预览" aria-label="显示预览"><ChevronLeft size={17} /></button></aside> : <aside className="file-preview-panel" aria-label="文件预览"><div className="preview-heading"><div><div className="section-kicker">文件预览</div><h3>{filePreview?.path ?? selectedFilePath ?? "暂无文件"}</h3></div><span className="panel-heading-actions"><button className="icon-button" onClick={() => setRightCollapsed(true)} title="隐藏预览面板" aria-label="隐藏预览面板"><ChevronRight size={15} /></button></span></div>{previewState === "loading" && <div className="inspector-empty preview-state"><LoaderCircle className="spin" size={20} /><p>正在加载预览…</p><span>正在读取文件。</span></div>}{previewState === "unsupported" && <div className="inspector-empty preview-state preview-unsupported"><FileWarning size={22} /><h4>无法预览</h4><p>{previewMessage}</p></div>}{previewState === "error" && <div className="inspector-empty preview-state preview-error"><XCircle size={22} /><h4>文件预览失败</h4><p>{previewMessage}</p></div>}{previewState === "ready" && filePreview && <CodePreview preview={filePreview} />}{previewState === "idle" && <div className="inspector-empty"><FolderOpen size={18} /><p>选择文件后即可预览。</p></div>}</aside>}
     </main>
   </div>;
 }

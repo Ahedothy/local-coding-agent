@@ -65,6 +65,7 @@ class TraceSummary:
     final_answer: str | None
     error: str | None
     event_count: int
+    verification: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +145,7 @@ def summarize_events(events: Sequence[AgentEvent]) -> TraceSummary:
             final_answer=None,
             error=None,
             event_count=0,
+            verification={},
         )
 
     session_id = events[0].session_id
@@ -161,6 +163,7 @@ def summarize_events(events: Sequence[AgentEvent]) -> TraceSummary:
     tools_by_id: dict[str, ToolTrace] = {}
     tool_order: list[str] = []
     commands: list[dict[str, Any]] = []
+    verification: dict[str, Any] = {}
 
     for event in events:
         payload = event.payload
@@ -217,6 +220,10 @@ def summarize_events(events: Sequence[AgentEvent]) -> TraceSummary:
             context = payload.get("context")
             if isinstance(context, dict):
                 latest_context = context
+        elif event.type is AgentEventType.VERIFICATION_UPDATED:
+            candidate = payload.get("verification")
+            if isinstance(candidate, dict):
+                verification = candidate
         elif event.type is AgentEventType.ASSISTANT_MESSAGE:
             content = payload.get("content")
             tool_call_count = payload.get("tool_call_count", 0)
@@ -235,6 +242,9 @@ def summarize_events(events: Sequence[AgentEvent]) -> TraceSummary:
             if isinstance(candidate, str):
                 error = candidate
         elif event.type is AgentEventType.AGENT_FINISHED:
+            candidate_verification = payload.get("verification")
+            if isinstance(candidate_verification, dict):
+                verification = candidate_verification
             candidate_status = payload.get("status")
             if isinstance(candidate_status, str):
                 status = candidate_status
@@ -271,6 +281,7 @@ def summarize_events(events: Sequence[AgentEvent]) -> TraceSummary:
         final_answer=final_answer,
         error=error,
         event_count=len(events),
+        verification=verification,
     )
 
 
@@ -299,6 +310,14 @@ def format_summary(summary: TraceSummary) -> str:
         lines.append(
             "Context: "
             f"{context.get('total_chars', '--')}/{context.get('max_chars', '--')} chars"
+        )
+    if summary.verification:
+        verification_status = summary.verification.get("status", "--")
+        lines.append(
+            "Verification: "
+            f"{verification_status} "
+            f"(workspace v{summary.verification.get('workspace_version', '--')}, "
+            f"evidence={summary.verification.get('current_evidence_count', 0)})"
         )
     if summary.tools:
         lines.append("Tools:")

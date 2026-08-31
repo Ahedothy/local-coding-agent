@@ -91,6 +91,10 @@ SYSTEM_PROMPT = (
     "does not match, reread the file and regenerate the hunk. "
     "After a requested verification command succeeds, summarize the result and "
     "finish instead of repeating the same verification. "
+    "read_file returns a sha256 content fingerprint. Pass it as expected_sha256 "
+    "when editing a previously read file; for apply_patch use the expected_sha256 "
+    "path map. If the fingerprint is stale, reread before editing and never "
+    "overwrite newer user changes. "
     "For non-trivial tasks, "
     "state a concise 1-3 bullet plan in assistant text before the first tool "
     "call. After tool results, briefly state the next adjustment when useful; "
@@ -186,6 +190,7 @@ def _event_text(event: AgentEvent) -> str:
         AgentEventType.REFLECTION: "正在检查结果",
         AgentEventType.CONTEXT_TRUNCATED: "已裁剪上下文",
         AgentEventType.CONTEXT_COMPACTED: "已压缩上下文",
+        AgentEventType.VERIFICATION_UPDATED: "验证证据已更新",
         AgentEventType.AGENT_FINISHED: "Agent 已完成",
         AgentEventType.AGENT_ERROR: "运行已停止",
     }
@@ -234,6 +239,11 @@ def _event_text(event: AgentEvent) -> str:
             details.append(f"用时 {duration:.1f} 秒")
         if details:
             text += "（" + "，".join(details) + "）"
+        verification = event.payload.get("verification")
+        if isinstance(verification, dict):
+            verification_status = verification.get("status")
+            if isinstance(verification_status, str):
+                text += f"；验证状态 {verification_status}"
     return text
 
 

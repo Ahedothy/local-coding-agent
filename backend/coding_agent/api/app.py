@@ -86,6 +86,17 @@ SYSTEM_PROMPT = (
     "does not match, reread the file and regenerate the hunk. "
     "After a requested verification command succeeds, summarize the result and "
     "finish instead of repeating the same verification. "
+    "When a command is intended to validate the task, set verification_kind to "
+    "test, build, lint, typecheck, smoke, config, benchmark, scope, or other, "
+    "and provide concise verification_criteria. Tests are only one kind of "
+    "evidence: for projects without tests, use a relevant build, type check, "
+    "configuration check, or behavior smoke test. Never claim verification from "
+    "assistant text alone; rely on the local command result. "
+    "read_file returns a sha256 content fingerprint. When editing a file that "
+    "was previously read, pass that value as expected_sha256 (or use the "
+    "expected_sha256 path map for apply_patch). If the fingerprint no longer "
+    "matches, reread the file and regenerate the edit; never overwrite a stale "
+    "file based on old context. "
     "For non-trivial tasks, "
     "state a concise 1-3 bullet plan in assistant text before the first tool "
     "call. After tool results, briefly state the next adjustment when useful; "
@@ -176,7 +187,7 @@ class RunRecord:
                 self.run_id,
                 self.agent.session,
                 self.agent.context_manager,
-                {"turn_index": self.agent.turn_index},
+                self.agent.runtime_state(),
             )
         self.wakeup.set()
 

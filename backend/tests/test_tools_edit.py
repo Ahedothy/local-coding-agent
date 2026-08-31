@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 from pathlib import Path
 
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolRegistry
 from coding_agent.tools.edit import EDIT_TOOLS
 from coding_agent.workspace import Workspace
+from coding_agent.tools.file_version import sha256_file
 
 
 def make_context(tmp_path: Path) -> ToolContext:
@@ -50,6 +52,71 @@ def test_replace_in_file_replaces_one_exact_match(tmp_path: Path) -> None:
     assert result.success is True
     assert result.output["replacements"] == 1
     assert path.read_bytes() == b"def add(a, b):\n    return a + b\n"
+    assert result.output["sha256"] == sha256_file(path)
+
+
+def test_replace_in_file_rejects_stale_expected_sha256(tmp_path: Path) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    original = path.read_bytes()
+
+    result = execute_edit(
+        tmp_path,
+        {
+            "path": "main.py",
+            "old_text": "value = 1",
+            "new_text": "value = 2",
+            "expected_sha256": "0" * 64,
+        },
+    )
+
+    assert result.success is False
+    assert "stale file" in result.error
+    assert path.read_bytes() == original
+
+
+def test_apply_patch_rejects_stale_expected_sha256_without_writing(tmp_path: Path) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    patch = """diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+"""
+
+    result = execute_patch(
+        tmp_path,
+        {"patch": patch, "expected_sha256": {"main.py": "0" * 64}},
+    )
+
+    assert result.success is False
+    assert "stale file" in result.error
+    assert path.read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_apply_patch_accepts_json_encoded_expected_sha256_map(tmp_path: Path) -> None:
+    path = tmp_path / "main.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    patch = """diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -1 +1 @@
+-value = 1
++value = 2
+"""
+
+    result = execute_patch(
+        tmp_path,
+        {
+            "patch": patch,
+            "expected_sha256": json.dumps({"main.py": sha256_file(path)}),
+        },
+    )
+
+    assert result.success is True
+    assert path.read_text(encoding="utf-8") == "value = 2\n"
 
 
 def test_replace_in_file_fails_when_text_is_missing(tmp_path: Path) -> None:
