@@ -13,6 +13,8 @@
 - **多轮协作与历史回放**：一次会话可以连续追问；CLI 和 Web UI 共用本地 SQLite 历史，CLI 产生的运行记录可以在 Web UI 中回放并继续。
 - **可解释的 Agent 行为**：计划、工具活动、审批、错误和完成状态都以事件形式记录，便于用户理解运行过程，也便于测试和演示。
 - **乐观并发保护**：`read_file` 返回内容 SHA-256；编辑工具可携带 `expected_sha256`，若文件在读取后被 IDE、用户或其他进程更新，写入会在副作用发生前拒绝并要求重新读取，避免覆盖较新的修改。
+- **项目级指令**：自动读取工作区根目录 `AGENTS.md`，限长注入上下文，并在事件流记录来源、字符数和截断状态。
+- **验证与评测**：根据本地命令结果记录验证证据；模型临时错误有限重试；离线 Mock Evaluation 评估 Agent 闭环，GitHub Actions 自动运行检查。
 
 项目没有使用 LangChain、LangGraph、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架或 SDK。允许使用模型厂商的 API 客户端和原生 tool calling，但模型服务端不执行本项目的文件或命令工具。
 
@@ -34,7 +36,7 @@
 python -m pip install -e .
 ```
 
-这是可编辑安装：源码修改后不需要重复安装。默认依赖已经包含 CLI、Web API 和测试所需的 FastAPI、OpenAI、Uvicorn、pytest、httpx 等组件；不需要再额外拼接 `.[test,server]`。
+这是可编辑安装：源码修改后不需要重复安装。默认依赖只包含运行所需组件；测试环境请安装 `python -m pip install -e ".[test]"`，开发环境可安装 `python -m pip install -e ".[dev]"`。
 
 ### 配置模型
 
@@ -242,10 +244,8 @@ python -m coding_agent.trace ..\event_logs\demo.jsonl --timeline
 trace 只解析已记录的事件，不会再次调用模型、执行工具或恢复活动中的审批。更完整的模块边界、测试策略和演示安排见：
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：架构、职责和设计取舍
-- [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md)：测试策略与场景
-- [`docs/DEMO_PLAN.md`](docs/DEMO_PLAN.md)：演示任务与视频流程
-- [`docs/MULTI_TURN_PLAN.md`](docs/MULTI_TURN_PLAN.md)：多轮会话设计
-- [`docs/IMPLEMENTATION_RULES.md`](docs/IMPLEMENTATION_RULES.md)：实现约束
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：当前架构事实（含历史说明）
+
 
 ## 常见问题
 

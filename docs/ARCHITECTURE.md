@@ -1,5 +1,28 @@
 # Architecture
 
+> This document began as an MVP design proposal. Sections that conflict with
+> the current implementation are historical. The current system includes
+> SQLite history, deterministic context compaction, verification evidence,
+> optimistic concurrency, AGENTS.md instructions, and bounded model retries.
+
+## 当前实现摘要
+
+本项目是一个由 Python 自行实现的本地 Coding Agent。用户提交任务后，
+Agent 通过模型生成结构化工具调用，由本地 `ToolExecutor` 完成参数校验、
+审批和执行，再把结果放回上下文，循环直到得到最终答复或触发安全终止条件。
+
+当前主要模块如下：
+
+- `Agent Runtime`：模型调用、工具循环、重试、取消、超时和终止条件；
+- `ContextManager`：工具结果限长、旧结果压缩、事实摘要和消息组删除；
+- `Workspace`：路径边界、符号链接、文本/二进制和命令工作目录校验；
+- `ToolRegistry / ToolExecutor`：工具 schema、参数验证、审批和本地执行；
+- `VerificationLedger`：记录测试、构建、Lint、类型检查和 Smoke Test 等证据；
+- `ChangeStore`：保存本轮修改快照，并在撤销前检查文件是否被后续修改；
+- `SQLite / SSE / JSONL`：分别提供历史恢复、Web 事件流和离线诊断；
+- `AGENTS.md`：读取工作区根目录项目指令，并限长注入模型上下文。
+
+
 ## Project Goal
 
 `Local Coding Agent` is a student-built coding agent. It should accept a programming task, interact with a large language model, decide when to use tools, execute those tools locally, update context with tool results, and continue until the task is complete or a termination condition is reached.
@@ -135,7 +158,8 @@ Responsibilities:
 
 Non-responsibilities:
 
-- no model calls for summary compaction in MVP
+- no model calls are required for summary compaction; the implementation uses
+  deterministic extraction and compacted tool-result payloads
 - no tool execution
 - no provider-specific formatting beyond the internal ModelMessage shape
 
@@ -457,7 +481,9 @@ MVP context management should be simple:
 - truncate old non-system messages when context exceeds a character budget
 - truncate long tool outputs before adding them to context
 
-Do not implement summary compaction in MVP. It requires extra model calls and creates avoidable instability. Use the event name `context_truncated`, not `context_compacted`.
+Historical note: the original MVP proposal deferred summary compaction. The
+current implementation uses deterministic summary compaction and emits both
+`context_truncated` and `context_compacted` events as appropriate.
 
 ## Events
 
