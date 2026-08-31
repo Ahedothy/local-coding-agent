@@ -214,6 +214,7 @@ def test_apply_patch_updates_multiple_files_and_returns_standard_diff(tmp_path: 
     second = tmp_path / "config.py"
     first.write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
     second.write_text("DEBUG = False\n", encoding="utf-8")
+    expected_before = len(first.read_bytes()) + len(second.read_bytes())
     patch = """diff --git a/calculator.py b/calculator.py
 --- a/calculator.py
 +++ b/calculator.py
@@ -234,13 +235,14 @@ diff --git a/config.py b/config.py
     assert result.success is True
     assert first.read_text(encoding="utf-8") == "def add(a, b):\n    return a + b\n"
     assert second.read_text(encoding="utf-8") == "DEBUG = True\n"
+    expected_after = len(first.read_bytes()) + len(second.read_bytes())
     assert result.output["diff_summary"] == {
         "files": 2,
         "hunks": 2,
         "lines_added": 2,
         "lines_removed": 2,
-        "bytes_before": 49,
-        "bytes_after": 48,
+        "bytes_before": expected_before,
+        "bytes_after": expected_after,
     }
     assert "diff --git a/calculator.py b/calculator.py" in result.output["diff"]
     assert "-    return a - b\n+    return a + b" in result.output["diff"]
