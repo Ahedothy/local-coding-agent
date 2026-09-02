@@ -13,7 +13,7 @@ from typing import Any
 
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEvent, AgentEventType
-from coding_agent.models import ModelProvider, ModelRequest, ModelResponse
+from coding_agent.models import ModelMessage, ModelProvider, ModelRequest, ModelResponse
 from coding_agent.models.openai_compatible import ModelProviderError
 from coding_agent.models import ToolCall
 from coding_agent.tools import ToolContext, ToolExecutor, ToolResult
@@ -76,6 +76,7 @@ class Agent:
         self._iterations = 0
         self._tool_calls = 0
         self._plan_emitted = False
+        self._assistant_message_emitted = False
         self._turn_started_at: float | None = None
         self._turn_diffs: dict[str, str] = {}
         self.verification = VerificationLedger()
@@ -133,6 +134,7 @@ class Agent:
         self._iterations = 0
         self._tool_calls = 0
         self._plan_emitted = False
+        self._assistant_message_emitted = False
         self._turn_diffs = {}
         self._turn_started_at = time.monotonic()
         self._turn_index += 1
@@ -259,7 +261,6 @@ class Agent:
                     },
                 )
             )
-
             model_started_at = time.monotonic()
             response = None
             max_model_attempts = self.limits.max_model_retries + 1
@@ -333,6 +334,8 @@ class Agent:
                     },
                 )
             )
+            if not response.tool_calls and response.content and response.content.strip():
+                self._assistant_message_emitted = True
             if response.content and response.content.strip() and response.tool_calls:
                 is_initial_plan = not self._plan_emitted
                 await self._emit(
@@ -375,7 +378,8 @@ class Agent:
             for tool_call in calls_to_execute:
                 self._check_cancelled()
                 if self._tool_calls >= self.limits.max_total_tool_calls:
-                    return self._failed("maximum total tool calls exceeded")
+                    verified = await self._verified_completion()
+                    return verified or self._failed("maximum total tool calls exceeded")
                 self._tool_calls += 1
                 result = await self.tool_executor.execute(tool_call, self.tool_context)
                 await self._append_tool_result(result, iteration)
@@ -442,7 +446,8 @@ class Agent:
                 await self._append_tool_result(skipped_result, iteration)
 
             if self._tool_calls >= self.limits.max_total_tool_calls:
-                return self._failed("maximum total tool calls exceeded")
+                verified = await self._verified_completion()
+                return verified or self._failed("maximum total tool calls exceeded")
 
         if stale_file_failures > 0:
             return self._failed(
@@ -450,17 +455,9 @@ class Agent:
                 "stopped before overwriting newer content. "
                 "Please check the file and start the edit again."
             )
-        verification = self.verification.summary()
-        if self._turn_diffs and verification.get("status") in {"verified", "partially_verified"}:
-            return AgentRunResult(
-                status=SessionStatus.COMPLETED,
-                final_answer=(
-                    "任务已完成。代码修改已经应用，并且至少有一条验证命令成功通过。"
-                ),
-                iterations=self._iterations,
-                tool_calls=self._tool_calls,
-                verification=verification,
-            )
+        verified = await self._verified_completion()
+        if verified is not None:
+            return verified
         return self._failed("maximum iterations exceeded")
 
     async def _schedule_model_retry(
@@ -556,6 +553,86 @@ class Agent:
             error=error,
         )
 
+    async def _verified_completion(self) -> AgentRunResult | None:
+        """Return a successful result when verification already proves completion."""
+        verification = self.verification.summary()
+        if verification.get("status") not in {"verified", "partially_verified"}:
+            return None
+        final_answer = await self._generate_verified_final_answer(verification)
+        return AgentRunResult(
+            status=SessionStatus.COMPLETED,
+            final_answer=final_answer or "任务已完成。已生成并验证本次修改。",
+            iterations=self._iterations,
+            tool_calls=self._tool_calls,
+            verification=verification,
+        )
+
+    async def _generate_verified_final_answer(
+        self,
+        verification: dict[str, Any],
+    ) -> str | None:
+        """Ask the model for a real final answer once local evidence proves completion."""
+        summary_prompt = (
+            "本地工具已经完成必要修改，并且验证账本显示当前任务可以收尾。\n"
+            "请生成面向用户的最终回复，简洁说明完成了什么、验证了什么，"
+            "如果仍有未覆盖的风险也请如实说明。不要再调用工具。"
+        )
+        request = ModelRequest(
+            messages=[
+                *self.context_manager.build_messages(),
+                ModelMessage(
+                    role="user",
+                    content=(
+                        f"{summary_prompt}\n\n"
+                        f"验证摘要：{verification}"
+                    ),
+                ),
+            ],
+            tools=[],
+        )
+        try:
+            response = await asyncio.wait_for(
+                self.model_provider.complete(request),
+                timeout=self.limits.model_timeout_seconds,
+            )
+        except Exception:
+            return None
+        if response.tool_calls or not response.content or not response.content.strip():
+            return None
+        truncated = self.context_manager.add_assistant_message(response.content)
+        self._assistant_message_emitted = True
+        self._iterations += 1
+        await self._emit(
+            AgentEvent(
+                type=AgentEventType.MODEL_RESPONSE,
+                session_id=self.session.session_id,
+                iteration=self._iterations,
+                payload={
+                    "has_content": True,
+                    "tool_call_count": 0,
+                    "finish_reason": response.finish_reason,
+                    "usage": response.usage,
+                    "model_metadata": response.raw_metadata,
+                    "verified_final_answer": True,
+                },
+            )
+        )
+        await self._emit(
+            AgentEvent(
+                type=AgentEventType.ASSISTANT_MESSAGE,
+                session_id=self.session.session_id,
+                iteration=self._iterations,
+                payload={
+                    "content": response.content,
+                    "tool_call_count": 0,
+                    "has_changes": bool(self._turn_diffs),
+                    "verified_final_answer": True,
+                },
+            )
+        )
+        await self._emit_context_truncated(truncated, self._iterations)
+        return response.content
+
     def _check_cancelled(self) -> None:
         if self._cancel_event.is_set():
             raise _AgentCancelled
@@ -607,6 +684,20 @@ class Agent:
                         "error": result.error,
                         "turn_index": self._turn_index,
                         "duration_seconds": duration_seconds,
+                    },
+                )
+            )
+        elif result.status is SessionStatus.COMPLETED and result.final_answer and not self._assistant_message_emitted:
+            await self._emit(
+                AgentEvent(
+                    type=AgentEventType.ASSISTANT_MESSAGE,
+                    session_id=self.session.session_id,
+                    iteration=self._iterations or None,
+                    payload={
+                        "content": result.final_answer,
+                        "tool_call_count": 0,
+                        "has_changes": bool(self._turn_diffs),
+                        "synthetic": True,
                     },
                 )
             )

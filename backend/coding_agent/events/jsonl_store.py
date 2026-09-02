@@ -497,7 +497,11 @@ class SqliteRunStore:
                     FROM events
                     INNER JOIN runs ON runs.run_id = events.run_id
                     WHERE runs.session_id = ?
-                    ORDER BY events.sequence, events.rowid
+                    ORDER BY
+                        COALESCE(runs.started_at, runs.created_at),
+                        runs.created_at,
+                        events.sequence,
+                        events.rowid
                     """,
                     (session_id,),
                 ).fetchall()

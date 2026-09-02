@@ -135,6 +135,61 @@ def test_api_activates_a_completed_session_without_continue_step(tmp_path: Path)
     ] == ["first question", "follow up"]
 
 
+def test_api_new_sessions_are_listed_as_separate_conversations(tmp_path: Path) -> None:
+    app = create_app(
+        make_factory([
+            ModelResponse(content="first answer"),
+            ModelResponse(content="second answer"),
+        ]),
+        SqliteRunStore(tmp_path / "history.db"),
+    )
+
+    async def scenario() -> tuple[httpx.Response, httpx.Response, str, str]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first_session = (
+                await client.post("/sessions", json={"workspace_root": str(tmp_path)})
+            ).json()["session_id"]
+            first_run = (
+                await client.post(
+                    f"/sessions/{first_session}/runs",
+                    json={"task": "first task"},
+                )
+            ).json()["run_id"]
+            await client.get(f"/runs/{first_run}/events")
+
+            second_session = (
+                await client.post("/sessions", json={"workspace_root": str(tmp_path)})
+            ).json()["session_id"]
+            second_run = (
+                await client.post(
+                    f"/sessions/{second_session}/runs",
+                    json={"task": "second task"},
+                )
+            ).json()["run_id"]
+            await client.get(f"/runs/{second_run}/events")
+
+            history = await client.get("/history")
+            first_record = await client.get(f"/history/sessions/{first_session}")
+            return history, first_record, first_session, second_session
+
+    history, first_record, first_session, second_session = asyncio.run(scenario())
+
+    assert history.status_code == 200
+    summaries = history.json()
+    assert {item["session_id"] for item in summaries[:2]} == {
+        first_session,
+        second_session,
+    }
+    assert first_record.status_code == 200
+    first_messages = [
+        event["payload"]["content"]
+        for event in first_record.json()["events"]
+        if event["type"] == "user_message"
+    ]
+    assert first_messages == ["first task"]
+
+
 def test_api_rejects_overlapping_runs(tmp_path: Path) -> None:
     class BlockingProvider:
         def __init__(self) -> None:

@@ -3,13 +3,45 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from coding_agent.agent import Agent, AgentLimits, Session, SessionStatus
 from coding_agent.context import ContextManager
 from coding_agent.events import AgentEventType
 from coding_agent.models import ModelResponse, MockModelProvider, ToolCall
 from coding_agent.models import ModelProviderError
-from coding_agent.tools import ToolExecutor, ToolRegistry
+from coding_agent.tools import Tool, ToolContext, ToolExecutor, ToolRegistry, ToolResult
 from coding_agent.tools.filesystem import FILESYSTEM_TOOLS
+
+
+class VerifyArguments(BaseModel):
+    pass
+
+
+class VerifyTool(Tool):
+    name = "verify_done"
+    description = "Record successful verification evidence."
+    parameters_model = VerifyArguments
+
+    async def execute(
+        self,
+        context: ToolContext,
+        arguments: VerifyArguments,
+    ) -> ToolResult:
+        return ToolResult(
+            tool_call_id="pending",
+            tool_name=self.name,
+            success=True,
+            output={
+                "command": ["verify_done"],
+                "returncode": 0,
+                "stdout": "verification passed",
+                "verification": {
+                    "kind": "build",
+                    "criteria": ["workspace has been verified"],
+                },
+            },
+        )
 
 
 def make_agent(
@@ -18,10 +50,14 @@ def make_agent(
     *,
     limits: AgentLimits | None = None,
     events: list | None = None,
+    extra_tools: list[Tool] | None = None,
 ) -> tuple[Agent, MockModelProvider, list]:
     event_log = events if events is not None else []
     provider = MockModelProvider(responses)
-    executor = ToolExecutor(ToolRegistry(FILESYSTEM_TOOLS), event_handler=event_log.append)
+    executor = ToolExecutor(
+        ToolRegistry([*FILESYSTEM_TOOLS, *(extra_tools or [])]),
+        event_handler=event_log.append,
+    )
     agent = Agent(
         provider,
         executor,
@@ -234,6 +270,41 @@ def test_agent_stops_at_max_iterations(tmp_path: Path) -> None:
     assert result.status == SessionStatus.FAILED
     assert result.error == "maximum iterations exceeded"
     assert result.iterations == 2
+
+
+def test_agent_generates_final_answer_when_verified_completion_hits_iteration_limit(
+    tmp_path: Path,
+) -> None:
+    verify_call = ToolCall(id="verify-1", name="verify_done", arguments={})
+    agent, provider, events = make_agent(
+        tmp_path,
+        [
+            ModelResponse(tool_calls=[verify_call]),
+            ModelResponse(tool_calls=[verify_call]),
+            ModelResponse(content="已完成计算器封装，并通过构建验证。"),
+        ],
+        limits=AgentLimits(max_iterations=2),
+        extra_tools=[VerifyTool()],
+    )
+
+    result = run(agent)
+
+    assert result.status == SessionStatus.COMPLETED
+    assert result.final_answer == "已完成计算器封装，并通过构建验证。"
+    assert len(provider.requests) == 3
+    assert provider.requests[-1].tools == []
+    assert provider.requests[-1].messages[-1].role == "user"
+    assert "请生成面向用户的最终回复" in (
+        provider.requests[-1].messages[-1].content or ""
+    )
+    final_message = [
+        event
+        for event in events
+        if event.type is AgentEventType.ASSISTANT_MESSAGE
+        and event.payload["tool_call_count"] == 0
+    ][-1]
+    assert final_message.payload["content"] == "已完成计算器封装，并通过构建验证。"
+    assert final_message.payload["verified_final_answer"] is True
 
 
 def test_agent_stops_after_repeated_empty_model_responses(tmp_path: Path) -> None:

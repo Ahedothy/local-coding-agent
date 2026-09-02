@@ -891,6 +891,7 @@ export default function AgentConsole() {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [workspacePhase, setWorkspacePhase] = useState<WorkspacePhase>("idle");
   const [projectSwitching, setProjectSwitching] = useState(false);
+  const [sessionCreating, setSessionCreating] = useState(false);
   const [displayedAnswer, setDisplayedAnswer] = useState("");
   const [answerStreaming, setAnswerStreaming] = useState(false);
   const [instantAnswerTurnKey, setInstantAnswerTurnKey] = useState<string | null>(null);
@@ -912,6 +913,7 @@ export default function AgentConsole() {
   const workspaceFilesCache = useRef<Map<string, WorkspaceEntry[]>>(new Map());
   const workspaceRoots = useRef<Map<string, string>>(new Map());
   const conversationEventsCache = useRef<Map<string, AgentEvent[]>>(new Map());
+  const sessionSelectionToken = useRef(0);
   const projectsCollapsedInitially = useRef(false);
   const answerTimer = useRef<number | null>(null);
   const workspaceRequestsInFlight = useRef<Set<string>>(new Set());
@@ -1145,10 +1147,12 @@ export default function AgentConsole() {
         && event.payload.content === optimisticUserEvent.payload.content,
       );
       setEvents((current) => {
+        const cached = conversationEventsCache.current.get(started.session_id) ?? initialEvents;
         const next = replacesOptimisticUser
-          ? current.map((item) => item.event_id === optimisticUserEvent?.event_id ? event : item)
-          : current.some((item) => item.event_id === event.event_id) ? current : [...current, event];
+          ? cached.map((item) => item.event_id === optimisticUserEvent?.event_id ? event : item)
+          : cached.some((item) => item.event_id === event.event_id) ? cached : [...cached, event];
         conversationEventsCache.current.set(started.session_id, next);
+        if (activeSessionId.current !== started.session_id) return current;
         return next;
       });
       if (event.type === "approval_requested") {
@@ -1174,6 +1178,9 @@ export default function AgentConsole() {
         });
       }
       if (event.type === "agent_finished" || event.type === "agent_error") {
+        setRun((current) => current && current.run_id === started.run_id
+          ? { ...current, status: readPayloadString(event, "status") ?? (event.type === "agent_error" ? "failed" : "completed") }
+          : current);
         setBusy(false);
         setPendingApproval(null);
         setApprovalBusy(false);
@@ -1197,10 +1204,12 @@ export default function AgentConsole() {
 
   async function replayHistory(_runId: string, sessionId?: string, targetRoot?: string | null) {
     if (!sessionId) return;
+    const selectionToken = ++sessionSelectionToken.current;
     setError(null);
     eventSource.current?.close();
     activeStreamRunId.current = null;
     setBusy(false);
+    setSessionCreating(false);
     const switchingProject = projectKey(session?.workspace_root) !== projectKey(targetRoot);
     setProjectSwitching(switchingProject);
     try {
@@ -1208,6 +1217,7 @@ export default function AgentConsole() {
       const activationResponse = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}/activate`, { method: "POST" });
       if (!activationResponse.ok) throw new Error(await responseError(activationResponse, "无法激活此会话"));
       const activated = (await activationResponse.json()) as SessionResponse;
+      if (sessionSelectionToken.current !== selectionToken) return;
       const cachedEvents = conversationEventsCache.current.get(sessionId) ?? [];
       const liveRunId = activated.run_id ?? _runId;
       const liveStatus = activated.status === "running" ? "running" : "completed";
@@ -1237,7 +1247,9 @@ export default function AgentConsole() {
         setWorkspacePhase(cachedFiles ? "idle" : "loading");
         void loadWorkspaceFiles(activated.session_id).catch((reason) => {
           setError(requestErrorMessage(reason, "无法加载工作区文件"));
-        }).finally(() => setProjectSwitching(false));
+        }).finally(() => {
+          if (sessionSelectionToken.current === selectionToken) setProjectSwitching(false);
+        });
       } else {
         setProjectSwitching(false);
         setWorkspacePhase("idle");
@@ -1248,6 +1260,7 @@ export default function AgentConsole() {
         const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(sessionId)}`);
         if (!response.ok) throw new Error(await responseError(response, "无法加载此会话"));
         const record = (await response.json()) as HistoryRecord;
+        if (sessionSelectionToken.current !== selectionToken || activeSessionId.current !== sessionId) return;
         conversationEventsCache.current.set(sessionId, mergeAgentEvents(cachedEvents, record.events));
         setEvents((current) => mergeAgentEvents(current, record.events));
         if (liveStatus !== "running") {
@@ -1255,9 +1268,11 @@ export default function AgentConsole() {
           setInstantAnswerTurnKey(buildConversationTurns(record.events).at(-1)?.key ?? null);
         }
       })().catch((reason) => {
+        if (sessionSelectionToken.current !== selectionToken) return;
         setError(requestErrorMessage(reason, "无法加载此会话"));
       });
     } catch (reason) {
+      if (sessionSelectionToken.current !== selectionToken) return;
       setWorkspacePhase("idle");
       setError(requestErrorMessage(reason, "无法加载此次运行"));
       setProjectSwitching(false);
@@ -1265,11 +1280,15 @@ export default function AgentConsole() {
   }
 
   async function newConversation(projectRoot?: string) {
+    const selectionToken = ++sessionSelectionToken.current;
     const root = projectRoot || session?.workspace_root || workspaceRoot;
     const switchingProject = projectKey(session?.workspace_root) !== projectKey(root);
     eventSource.current?.close();
     activeStreamRunId.current = null;
+    activeSessionId.current = null;
     setBusy(false);
+    setSessionCreating(Boolean(root));
+    if (switchingProject) setSession(null);
     setProjectSwitching(switchingProject);
     if (switchingProject) {
       setWorkspacePhase("loading");
@@ -1290,8 +1309,11 @@ export default function AgentConsole() {
     setRevertedChanges(new Set());
     setUnavailableChanges(new Set());
     if (root) {
-      await createSession(root, switchingProject);
-      setProjectSwitching(false);
+      await createSession(root, switchingProject, selectionToken);
+      if (sessionSelectionToken.current === selectionToken) {
+        setProjectSwitching(false);
+        setSessionCreating(false);
+      }
     } else {
       setSession(null);
       setWorkspaceFiles([]);
@@ -1300,10 +1322,11 @@ export default function AgentConsole() {
       setFilePreview(null);
       setPreviewState("idle");
       setProjectSwitching(false);
+      setSessionCreating(false);
     }
   }
 
-  async function createSession(root: string, refreshProject = true) {
+  async function createSession(root: string, refreshProject = true, selectionToken = ++sessionSelectionToken.current) {
     if (!root) return;
     setError(null);
     setEvents([]);
@@ -1319,6 +1342,7 @@ export default function AgentConsole() {
       const response = await fetch(`${API_BASE}/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace_root: root }) });
       if (!response.ok) throw new Error(await responseError(response, "无法创建会话"));
       const created = (await response.json()) as SessionResponse;
+      if (sessionSelectionToken.current !== selectionToken) return;
       activeSessionId.current = created.session_id;
       workspaceRoots.current.set(created.session_id, created.workspace_root);
       setSession(created);
@@ -1330,17 +1354,20 @@ export default function AgentConsole() {
       setWorkspaceFiles(cachedFiles ?? []);
       setWorkspacePhase(cachedFiles ? "idle" : "loading");
       void loadWorkspaceFiles(created.session_id).catch((reason) => {
+        if (sessionSelectionToken.current !== selectionToken || activeSessionId.current !== created.session_id) return;
         setError(requestErrorMessage(reason, "无法加载工作区文件"));
       });
     } catch (reason) {
+      if (sessionSelectionToken.current !== selectionToken) return;
       setWorkspacePhase("idle");
+      setSessionCreating(false);
       setError(requestErrorMessage(reason, "无法创建会话"));
     }
   }
 
   async function runTask() {
     const submittedTask = task.trim();
-    if (!session || workspacePhase !== "idle" || !submittedTask) return;
+    if (!session || sessionCreating || activeSessionId.current !== session.session_id || workspacePhase !== "idle" || !submittedTask) return;
     setError(null);
     if (answerTimer.current !== null) {
       window.clearInterval(answerTimer.current);
@@ -1353,9 +1380,14 @@ export default function AgentConsole() {
     eventSource.current?.close();
     activeStreamRunId.current = null;
     try {
+      const runSession = session;
       const response = await fetch(`${API_BASE}/sessions/${session.session_id}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task: submittedTask, auto_approve: autoApprovalEnabled }) });
       if (!response.ok) throw new Error(await responseError(response, "无法启动运行"));
       const started = (await response.json()) as RunResponse;
+      if (activeSessionId.current !== started.session_id || runSession.session_id !== started.session_id) {
+        setBusy(false);
+        return;
+      }
       setTask("");
       setRun(started);
       // Apply the new turn and its collapsed default in the same React update
@@ -1466,6 +1498,7 @@ export default function AgentConsole() {
 
   async function chooseDirectory() {
     setError(null);
+    setSessionCreating(false);
     setWorkspacePhase("selecting");
 
     try {
@@ -1721,11 +1754,11 @@ export default function AgentConsole() {
           })}
           {busy && !latestFinalAnswer && latestTurn && !latestTurn.events.some((event) => thinkingEventTypes.includes(event.type)) && <div className="activity-pending"><LoaderCircle className="spin" size={14} />正在准备活动</div>}
         {!session && <div className="workspace-gate"><div className="workspace-gate-icon"><FolderOpen size={20} /></div><h3>请先选择项目</h3><p>选择本地项目后即可使用文件和命令工具。</p><button className="button button-primary" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={14} />选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={14} />正在加载项目…</> : <><FolderOpen size={14} />选择项目</>}</button></div>}
-          {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>你想从哪里开始？</h3><p>选择一个起点，或在下方描述自己的任务。</p><div className="starter-grid">{starterActions.map((action) => { const Icon = action.icon; return <button type="button" className="starter-card" key={action.id} onClick={() => chooseStarterPrompt(action.prompt)} disabled={busy || workspacePhase !== "idle"}><Icon size={17} /><span><strong>{action.title}</strong><small>{action.description}</small></span></button>; })}</div></div>}
+          {!events.length && session && <div className="empty-trace conversation-empty"><div className="empty-icon"><Terminal size={19} /></div><h3>你想从哪里开始？</h3><p>选择一个起点，或在下方描述自己的任务。</p><div className="starter-grid">{starterActions.map((action) => { const Icon = action.icon; return <button type="button" className="starter-card" key={action.id} onClick={() => chooseStarterPrompt(action.prompt)} disabled={busy || sessionCreating || workspacePhase !== "idle"}><Icon size={17} /><span><strong>{action.title}</strong><small>{action.description}</small></span></button>; })}</div></div>}
           {error && <div className="error-banner"><XCircle size={15} />{error}</div>}
         </div>
 
-        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>自动批准本地操作</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "本条消息自动批准" : "需要手动审批"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">给 Agent 发送消息</label><div className="composer-input-shell"><textarea ref={taskInputRef} id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="给 Agent 发送消息。按 Enter 发送，按 Ctrl+Enter 换行。" placeholder={session ? "让 Agent 检查、修改并验证你的工作区…" : "选择工作区后即可使用本地 Agent 工具…"} rows={3} disabled={!session || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || !task.trim()} aria-label={busy ? "取消 Agent 执行" : "发送消息"} title={busy ? "取消 Agent 执行" : "发送消息"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "取消" : "发送"}</button></div></div>
+        <div className={`conversation-composer ${!session ? "is-locked" : ""}`}><div className="composer-approval-row"><label className="composer-approval-toggle"><input type="checkbox" checked={autoApprovalEnabled} onChange={(event) => setAutoApprovalEnabled(event.target.checked)} disabled={!session || sessionCreating || busy || workspacePhase !== "idle"} /><ShieldCheck size={14} /><span>自动批准本地操作</span></label><span className={`composer-approval-status ${autoApprovalEnabled ? "is-enabled" : ""}`}>{autoApprovalEnabled ? "本条消息自动批准" : "需要手动审批"}</span></div><label className="visually-hidden" htmlFor="task-upgraded">给 Agent 发送消息</label><div className="composer-input-shell"><textarea ref={taskInputRef} id="task-upgraded" value={task} onChange={(event) => setTask(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.nativeEvent.isComposing || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return; event.preventDefault(); void runTask(); }} aria-label="给 Agent 发送消息。按 Enter 发送，按 Ctrl+Enter 换行。" placeholder={session ? (sessionCreating ? "正在新建会话…" : "让 Agent 检查、修改并验证你的工作区…") : "选择工作区后即可使用本地 Agent 工具…"} rows={3} disabled={!session || sessionCreating || busy || workspacePhase !== "idle"} /><button className={`composer-submit ${busy ? "is-cancel" : ""}`} onClick={() => { if (busy) void cancelRun(); else void runTask(); }} disabled={busy ? false : !session || sessionCreating || !task.trim()} aria-label={busy ? "取消 Agent 执行" : "发送消息"} title={busy ? "取消 Agent 执行" : "发送消息"}>{busy ? <CircleStop size={16} /> : <Send size={16} />}{busy ? "取消" : "发送"}</button></div></div>
       </section>
 
       <div className={`pane-resizer ${rightCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("right", event)} role="separator" aria-label="调整文件预览面板宽度"></div>
