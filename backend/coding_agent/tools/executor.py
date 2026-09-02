@@ -49,10 +49,13 @@ class ToolExecutor:
         """Validate and execute one model-produced tool call."""
         tool = self.registry.get(tool_call.name)
         if tool is None:
+            available_names = sorted(self.registry.names())
+            available = ", ".join(available_names)
+            detail = f"; available tools: {available}" if available else ""
             return await self._failure(
                 tool_call,
                 context,
-                f"unknown tool: {tool_call.name}",
+                f"unknown tool: {tool_call.name}{detail}",
                 emit_started=False,
             )
 

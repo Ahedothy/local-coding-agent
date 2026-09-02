@@ -29,7 +29,7 @@ def ensure_expected_sha256(path: Path, expected: str | None, relative_path: str)
     if current != expected:
         raise ValueError(
             "stale file: "
-            f"{relative_path} changed after it was read "
+            f"{relative_path} content fingerprint mismatch "
             f"(expected sha256={expected}, current sha256={current or 'missing'}); "
             "read the file again before editing"
         )

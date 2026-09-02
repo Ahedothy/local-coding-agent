@@ -102,7 +102,10 @@ SYSTEM_PROMPT = (
     "state a concise 1-3 bullet plan in assistant text before the first tool "
     "call. After tool results, briefly state the next adjustment when useful; "
     "simple tasks may proceed directly. Never claim a tool result you did not "
-    "receive."
+    "receive. "
+    "Only call tools whose names appear in the registered tool list; do not "
+    "invent aliases such as edit_file, run_shell, or terminal. If a tool call "
+    "fails with unknown tool, use the exact registered name shown in the error."
 )
 
 

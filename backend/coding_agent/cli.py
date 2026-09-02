@@ -100,7 +100,10 @@ SYSTEM_PROMPT = (
     "state a concise 1-3 bullet plan in assistant text before the first tool "
     "call. After tool results, briefly state the next adjustment when useful; "
     "simple tasks may proceed directly. Never claim a tool result you did not "
-    "receive."
+    "receive. "
+    "Only call tools whose names appear in the registered tool list; do not "
+    "invent aliases such as edit_file, run_shell, or terminal. If a tool call "
+    "fails with unknown tool, use the exact registered name shown in the error."
 )
 
 
@@ -243,8 +246,9 @@ def _event_text(event: AgentEvent) -> str:
         verification = event.payload.get("verification")
         if isinstance(verification, dict):
             verification_status = verification.get("status")
-            if isinstance(verification_status, str):
-                text += f"；验证状态 {verification_status}"
+            if verification_status in {"verified", "partially_verified"}:
+                count = verification.get("current_evidence_count", 0)
+                text += f"；验证证据 {verification_status}（{count} 条）"
     return text
 
 
@@ -291,6 +295,11 @@ def print_event(
         payload = json.dumps(event.payload, ensure_ascii=False, default=str)
         print(f"[{event.type.value}] {payload}")
         return
+    if event.type is AgentEventType.VERIFICATION_UPDATED:
+        verification = event.payload.get("verification")
+        status = verification.get("status") if isinstance(verification, dict) else None
+        if status not in {"verified", "partially_verified"}:
+            return
     # The structured event log still records every transition.  The terminal
     # view intentionally omits protocol-only messages that add little value
     # to a person watching a run (full assistant text is printed as the final
@@ -568,6 +577,19 @@ def _print_result(result, *, show_diff: bool = False) -> None:
     if result.final_answer is not None:
         print("\nFinal answer:")
         _print_answer(result.final_answer, ansi=ansi, show_diff=show_diff)
+        verification = getattr(result, "verification", None)
+        if isinstance(verification, dict) and verification.get("status") in {"verified", "partially_verified"}:
+            count = verification.get("current_evidence_count", 0)
+            version = verification.get("workspace_version", 0)
+            print(f"\nVerification evidence: {verification.get('status')} ({count} 条，工作区 v{version})")
+            evidence = verification.get("evidence")
+            if isinstance(evidence, list):
+                for item in evidence[-5:]:
+                    if not isinstance(item, dict) or item.get("workspace_version") != version:
+                        continue
+                    kind = item.get("kind", "other")
+                    summary = item.get("summary") or ""
+                    print(f"  - {kind}: {_shorten(str(summary), 180)}")
     else:
         print(f"\n{ansi.red('Agent did not complete')}: {result.error}", file=sys.stderr)
 

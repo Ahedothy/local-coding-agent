@@ -2,12 +2,12 @@
 
 This is the deterministic multi-file repository used to demonstrate the local
 coding agent. It is a small, dependency-light task management library with an
-in-memory store, a service layer, and a status report. The initial repository
-contains intentional defects in search/pagination and report aggregation.
+in-memory store, a service layer, and a status report.
 
-The agent should inspect the tests and implementation, run the failing test
-suite, make the minimal changes across the affected files, and run the full
-suite again.
+Use the test suite as the executable specification: inspect the project, run
+the tests, locate the causes of any failures, make minimal implementation
+changes, and run the full suite again. The repository intentionally leaves the
+diagnosis to the agent rather than documenting the expected fixes here.
 
 Run the tests from this directory:
 
@@ -15,6 +15,6 @@ Run the tests from this directory:
 python -m pytest -q
 ```
 
-The expected initial state has failing tests in `test_task_manager.py`. A
-successful run should finish with all tests passing and a diff touching
-`task_manager/service.py` and `task_manager/report.py`.
+The initial test run is expected to provide the first diagnostic signal. A
+successful run should finish with all tests passing while preserving the
+existing public API.

@@ -21,6 +21,7 @@ from .schemas import (
     DirectorySelectionResponse,
     HistoryRecordResponse,
     HistorySummaryResponse,
+    RenameSessionRequest,
     RunRequest,
     RunResponse,
     RevertChangeResponse,
@@ -255,6 +256,30 @@ def register_routes(app: FastAPI, state: ApiState) -> None:
             status="running" if live_run is not None else "idle",
             run_id=live_run.run_id if live_run is not None else None,
         )
+
+    @app.delete("/history/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_history_session(session_id: str) -> None:
+        """Delete one conversation and its persisted history."""
+        session = state.sessions.get(session_id)
+        if session is not None and session.current_run is not None and not session.current_run.finished:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot delete a running session")
+        if not state.history_store.delete_session(session_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session history not found")
+        state.sessions.pop(session_id, None)
+
+    @app.patch("/history/sessions/{session_id}", response_model=HistorySummaryResponse)
+    async def rename_history_session(session_id: str, request: RenameSessionRequest) -> HistorySummaryResponse:
+        session = state.sessions.get(session_id)
+        if session is not None and session.current_run is not None and not session.current_run.finished:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot rename a running session")
+        title = state.history_store.rename_session(session_id, request.title)
+        if title is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session history not found")
+        run_ids = state.history_store.list_run_ids_for_session(session_id)
+        events = state.history_store.read_session(session_id)
+        if not run_ids or not events:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session history not found")
+        return _history_summary(run_ids[0], events, turn_count=sum(event.type.value == "user_message" for event in events), title=title)
 
     @app.get("/sessions/{session_id}/files", response_model=list[WorkspaceEntryResponse])
     async def list_session_files(session_id: str) -> list[WorkspaceEntryResponse]:

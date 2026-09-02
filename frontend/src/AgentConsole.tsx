@@ -19,13 +19,16 @@ import {
   Hammer,
   LoaderCircle,
   ListChecks,
+  Pencil,
   RotateCcw,
+  RefreshCw,
   ScanSearch,
   Send,
   ShieldCheck,
   ShieldX,
   SquarePen,
   Terminal,
+  Trash2,
   UserRound,
   Wrench,
   XCircle,
@@ -63,6 +66,7 @@ type FilePreview = { path: string; content: string; truncated?: boolean };
 type WorkspaceEntry = { path: string; kind: "file" | "directory" };
 type WorkspacePhase = "idle" | "selecting" | "loading";
 type PreviewState = "idle" | "loading" | "ready" | "unsupported" | "error";
+type BackendStatus = "checking" | "online" | "offline";
 type ActivityStep = { event: AgentEvent; events: AgentEvent[] };
 type ConversationTurn = { key: string; userEvent: AgentEvent; events: AgentEvent[] };
 
@@ -73,6 +77,20 @@ function mergeAgentEvents(...groups: AgentEvent[][]): AgentEvent[] {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
+const BACKEND_UNAVAILABLE_MESSAGE =
+  "无法连接本地后端。请先在 backend 目录运行 python -m uvicorn coding_agent.api:app --port 8000，然后重试。";
+
+function isNetworkRequestError(reason: unknown): boolean {
+  if (!(reason instanceof Error)) return false;
+  return reason instanceof TypeError
+    || /failed to fetch|networkerror|network request failed|load failed/i.test(reason.message);
+}
+
+function requestErrorMessage(reason: unknown, fallback: string): string {
+  if (isNetworkRequestError(reason)) return BACKEND_UNAVAILABLE_MESSAGE;
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  return fallback;
+}
 const eventLabels: Record<string, string> = {
   session_started: "会话已创建",
   user_message: "用户消息",
@@ -172,6 +190,14 @@ function projectName(workspaceRoot?: string | null) {
   return normalized.split("/").at(-1) || "项目";
 }
 
+function projectNameWithDisambiguation(workspaceRoot: string | null | undefined, duplicateNames: Set<string>) {
+  const name = projectName(workspaceRoot);
+  if (!duplicateNames.has(name)) return name;
+  const normalized = normalizeProjectPath(workspaceRoot);
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.length > 1 ? `${name} · ${parts.at(-2)}` : name;
+}
+
 function projectKey(workspaceRoot?: string | null) {
   return normalizeProjectPath(workspaceRoot).toLocaleLowerCase();
 }
@@ -213,9 +239,15 @@ function toolDisplayName(toolName: unknown) {
     get_file_info: "查看文件信息",
     list_directory_tree: "查看目录结构",
     git_diff: "查看代码变更",
+    inspect_environment: "检查运行环境",
+    manage_process: "管理本地进程",
   };
-  const rawName = typeof toolName === "string" && toolName ? toolName : "本地工具";
-  return names[rawName] ?? `未知工具（${rawName.replaceAll("_", " ")}）`;
+  const rawName = typeof toolName === "string" && toolName.trim() ? toolName.trim() : "本地工具";
+  // Event payloads use the canonical underscore name.  Normalize spaces as a
+  // defensive measure for older persisted events, so a valid tool is not
+  // misleadingly rendered as “未知工具（inspect environment）”.
+  const canonicalName = rawName.replaceAll(" ", "_");
+  return names[canonicalName] ?? `未知工具（${rawName.replaceAll("_", " ")}）`;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -279,6 +311,8 @@ function activityPresentation(step: ActivityStep) {
         ? { title: "补丁行数需要修正", description: "@@ 头部的行数与修改块不匹配。旧行数=上下文行+删除行，新行数=上下文行+新增行。Agent 应重新生成修改块。" }
       : error.includes("invalid unified diff")
         ? { title: "需要重新生成补丁", description: "补丁格式无效。Agent 应重新读取文件并生成新的补丁。" }
+      : error.includes("content fingerprint mismatch")
+        ? { title: "文件指纹不匹配", description: "本次修改携带的文件指纹与当前内容不一致。Agent 应重新读取文件后再生成修改。" }
       : error.includes("stale file")
         ? { title: "文件已被更新", description: "文件在 Agent 读取后发生了变化。请重新读取最新内容，再生成修改。" }
         : { title: `${toolName}失败`, description: error };
@@ -845,6 +879,8 @@ export default function AgentConsole() {
   const [run, setRun] = useState<RunResponse | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>("checking");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workspaceExpanded, setWorkspaceExpanded] = useState(true);
@@ -862,6 +898,9 @@ export default function AgentConsole() {
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [revertedChanges, setRevertedChanges] = useState<Set<string>>(new Set());
   const [unavailableChanges, setUnavailableChanges] = useState<Set<string>>(new Set());
+  const [editingHistoryId, setEditingHistoryId] = useState<string | null>(null);
+  const [historyTitleDraft, setHistoryTitleDraft] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<{ type: "session" | "project"; id: string; label: string } | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(270);
@@ -905,6 +944,11 @@ export default function AgentConsole() {
       group.items.push(item);
       groups.set(key, group);
     });
+    const duplicateNames = new Set<string>();
+    const nameCounts = new Map<string, number>();
+    groups.forEach((group) => nameCounts.set(group.name, (nameCounts.get(group.name) ?? 0) + 1));
+    nameCounts.forEach((count, name) => { if (count > 1) duplicateNames.add(name); });
+    groups.forEach((group) => { group.name = projectNameWithDisambiguation(group.root, duplicateNames); });
     return [...groups.values()].sort((left, right) => {
       const leftActive = projectKey(session?.workspace_root) === left.key;
       const rightActive = projectKey(session?.workspace_root) === right.key;
@@ -930,6 +974,19 @@ export default function AgentConsole() {
   useEffect(() => {
     void loadHistory(true);
   }, []);
+
+  useEffect(() => {
+    if (backendStatus === "offline") return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadHistory();
+    };
+    const timer = window.setInterval(refreshWhenVisible, 15000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [backendStatus]);
 
   useEffect(() => {
     if (answerTimer.current !== null) window.clearInterval(answerTimer.current);
@@ -978,11 +1035,17 @@ export default function AgentConsole() {
   async function loadHistory(showLoading = false) {
     if (historyRequestInFlight.current) return;
     historyRequestInFlight.current = true;
-    if (showLoading) setHistoryLoading(true);
+    if (showLoading) {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      setBackendStatus("checking");
+    }
     try {
       const response = await fetch(`${API_BASE}/history?limit=50`);
+      setBackendStatus("online");
       if (!response.ok) throw new Error(await responseError(response, "无法加载运行历史"));
       const loaded = (await response.json()) as HistoryItem[];
+      setHistoryError(null);
       setHistory((current) => {
         const loadedSessionIds = new Set(loaded.map((item) => item.session_id));
         const stillRunning = current.filter(
@@ -991,10 +1054,66 @@ export default function AgentConsole() {
         return [...loaded, ...stillRunning].slice(0, 50);
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法加载运行历史");
+      const message = requestErrorMessage(reason, "无法加载运行历史");
+      if (isNetworkRequestError(reason)) setBackendStatus("offline");
+      setHistoryError(message);
     } finally {
       historyRequestInFlight.current = false;
       if (showLoading) setHistoryLoading(false);
+    }
+  }
+
+  async function deleteHistorySession(item: HistoryItem) {
+    try {
+      const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(item.session_id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseError(response, "无法删除会话"));
+      setHistory((current) => current.filter((candidate) => candidate.session_id !== item.session_id));
+      setPendingDelete(null);
+      if (item.session_id === session?.session_id) {
+        eventSource.current?.close();
+        activeStreamRunId.current = null;
+        activeSessionId.current = null;
+        setSession(null);
+        setRun(null);
+        setEvents([]);
+        setWorkspaceFiles([]);
+        setWorkspaceRoot("");
+        setSelectedFilePath(null);
+        selectedFilePathRef.current = null;
+        setFilePreview(null);
+        setPreviewState("idle");
+      }
+    } catch (reason) {
+      setError(requestErrorMessage(reason, "无法删除会话"));
+    }
+  }
+
+  async function renameHistorySession(item: HistoryItem) {
+    const title = historyTitleDraft.trim();
+    if (!title) return;
+    try {
+      const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(item.session_id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
+      if (!response.ok) throw new Error(await responseError(response, "无法重命名会话"));
+      const updated = (await response.json()) as HistoryItem;
+      setHistory((current) => current.map((candidate) => candidate.session_id === item.session_id ? { ...candidate, title: updated.title } : candidate));
+      setEditingHistoryId(null);
+    } catch (reason) {
+      setError(requestErrorMessage(reason, "无法重命名会话"));
+    }
+  }
+
+  async function deleteProjectHistory(root: string) {
+    const items = history.filter((item) => projectKey(item.workspace_root) === projectKey(root));
+    for (const item of items) {
+      const response = await fetch(`${API_BASE}/history/sessions/${encodeURIComponent(item.session_id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseError(response, "无法删除项目历史"));
+    }
+    setHistory((current) => current.filter((item) => projectKey(item.workspace_root) !== projectKey(root)));
+    setPendingDelete(null);
+    if (projectKey(session?.workspace_root) === projectKey(root)) {
+      eventSource.current?.close(); activeStreamRunId.current = null; activeSessionId.current = null;
+      setSession(null); setRun(null); setEvents([]); setWorkspaceFiles([]); setWorkspaceRoot("");
+      setSelectedFilePath(null); selectedFilePathRef.current = null; setFilePreview(null); setPreviewState("idle");
     }
   }
 
@@ -1046,12 +1165,12 @@ export default function AgentConsole() {
       }
       if (isCurrentWorkspace && ["tool_finished", "tool_failed", "agent_finished"].includes(event.type)) {
         void loadWorkspaceFiles(started.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "无法刷新工作区");
+          setError(requestErrorMessage(reason, "无法刷新工作区"));
         });
       }
       if (isCurrentWorkspace && event.type === "tool_finished" && selectedFilePathRef.current) {
         void selectFile(selectedFilePathRef.current, started.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "无法刷新文件预览");
+          setError(requestErrorMessage(reason, "无法刷新文件预览"));
         });
       }
       if (event.type === "agent_finished" || event.type === "agent_error") {
@@ -1117,7 +1236,7 @@ export default function AgentConsole() {
         setPreviewMessage("");
         setWorkspacePhase(cachedFiles ? "idle" : "loading");
         void loadWorkspaceFiles(activated.session_id).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : "无法加载工作区文件");
+          setError(requestErrorMessage(reason, "无法加载工作区文件"));
         }).finally(() => setProjectSwitching(false));
       } else {
         setProjectSwitching(false);
@@ -1136,11 +1255,11 @@ export default function AgentConsole() {
           setInstantAnswerTurnKey(buildConversationTurns(record.events).at(-1)?.key ?? null);
         }
       })().catch((reason) => {
-        setError(reason instanceof Error ? reason.message : "无法加载此会话");
+        setError(requestErrorMessage(reason, "无法加载此会话"));
       });
     } catch (reason) {
       setWorkspacePhase("idle");
-      setError(reason instanceof Error ? reason.message : "无法加载此次运行");
+      setError(requestErrorMessage(reason, "无法加载此次运行"));
       setProjectSwitching(false);
     }
   }
@@ -1211,11 +1330,11 @@ export default function AgentConsole() {
       setWorkspaceFiles(cachedFiles ?? []);
       setWorkspacePhase(cachedFiles ? "idle" : "loading");
       void loadWorkspaceFiles(created.session_id).catch((reason) => {
-        setError(reason instanceof Error ? reason.message : "无法加载工作区文件");
+        setError(requestErrorMessage(reason, "无法加载工作区文件"));
       });
     } catch (reason) {
       setWorkspacePhase("idle");
-      setError(reason instanceof Error ? reason.message : "无法创建会话");
+      setError(requestErrorMessage(reason, "无法创建会话"));
     }
   }
 
@@ -1277,7 +1396,7 @@ export default function AgentConsole() {
       subscribeToRun(started, [optimisticUserEvent]);
     } catch (reason) {
       setBusy(false);
-      setError(reason instanceof Error ? reason.message : "无法启动运行");
+      setError(requestErrorMessage(reason, "无法启动运行"));
     }
   }
 
@@ -1291,7 +1410,7 @@ export default function AgentConsole() {
     try {
       await fetch(`${API_BASE}/runs/${run.run_id}/cancel`, { method: "POST" });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法取消运行");
+      setError(requestErrorMessage(reason, "无法取消运行"));
     }
   }
 
@@ -1314,7 +1433,7 @@ export default function AgentConsole() {
        if (!response.ok) throw new Error(await responseError(response, "无法处理审批"));
     } catch (reason) {
       setApprovalBusy(false);
-      setError(reason instanceof Error ? reason.message : "无法处理审批");
+      setError(requestErrorMessage(reason, "无法处理审批"));
     }
   }
 
@@ -1341,7 +1460,7 @@ export default function AgentConsole() {
         await selectFile(selectedFilePathRef.current, session.session_id);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法撤销修改");
+      setError(requestErrorMessage(reason, "无法撤销修改"));
     }
   }
 
@@ -1365,7 +1484,7 @@ export default function AgentConsole() {
       setWorkspaceRoot(selection.workspace_root);
       await createSession(selection.workspace_root);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法选择工作区");
+      setError(requestErrorMessage(reason, "无法选择工作区"));
       setWorkspacePhase("idle");
     }
   }
@@ -1385,7 +1504,7 @@ export default function AgentConsole() {
       if (firstFile && !selectedFilePathRef.current) {
         window.setTimeout(() => {
           void selectFile(firstFile.path, sessionId).catch((reason) => {
-            setError(reason instanceof Error ? reason.message : "无法预览文件");
+            setError(requestErrorMessage(reason, "无法预览文件"));
           });
         }, 0);
       }
@@ -1420,7 +1539,7 @@ export default function AgentConsole() {
     } catch (reason) {
       if (requestId !== previewRequestIdRef.current) return;
       setPreviewState("error");
-      setPreviewMessage(reason instanceof Error ? reason.message : "无法预览文件");
+      setPreviewMessage(requestErrorMessage(reason, "无法预览文件"));
     }
   }
 
@@ -1483,7 +1602,7 @@ export default function AgentConsole() {
   useEffect(() => {
     if (!session || !busy) return;
     const timer = window.setInterval(() => {
-      void loadWorkspaceFiles(session.session_id).catch((reason) => setError(reason instanceof Error ? reason.message : "无法刷新工作区"));
+      void loadWorkspaceFiles(session.session_id).catch((reason) => setError(requestErrorMessage(reason, "无法刷新工作区")));
     }, 700);
     return () => window.clearInterval(timer);
   }, [busy, session]);
@@ -1497,12 +1616,12 @@ export default function AgentConsole() {
   return <div className="console-shell">
     <header className="console-topbar">
       <div className="brand-lockup"><div className="brand-mark"><Bot size={20} /></div><div><p className="brand-name">Local Coding Agent</p><p className="brand-caption">本地项目编程助手</p></div></div>
-      <div className={`connection-state ${session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "执行中" : session ? "会话就绪" : "需要选择项目"}</div>
+      <div className={`connection-state ${backendStatus === "offline" ? "is-offline" : session ? "is-ready" : ""}`}><span className="state-dot" />{busy ? "执行中" : backendStatus === "offline" ? "后端未连接" : backendStatus === "checking" ? "正在连接后端" : session ? "会话就绪" : "需要选择项目"}</div>
     </header>
 
-    <main className="console-layout" style={layoutStyle}>
+<main className="console-layout" style={layoutStyle}>{(editingHistoryId || pendingDelete) && <div className="inline-dialog" role="dialog">{editingHistoryId && <form onSubmit={(event) => { event.preventDefault(); const item = history.find((candidate) => candidate.session_id === editingHistoryId); if (item) void renameHistorySession(item); }}><label>重命名会话</label><input autoFocus value={historyTitleDraft} onChange={(event) => setHistoryTitleDraft(event.target.value)} /><button type="submit">保存</button><button type="button" onClick={() => setEditingHistoryId(null)}>取消</button></form>}{pendingDelete && <div><p>确定删除{pendingDelete.type === "project" ? "项目历史" : "会话"}“{pendingDelete.label}”吗？</p><button onClick={() => pendingDelete.type === "project" ? void deleteProjectHistory(pendingDelete.id) : void deleteHistorySession(history.find((item) => item.session_id === pendingDelete.id) as HistoryItem)}>确定删除</button><button onClick={() => setPendingDelete(null)}>取消</button></div>}</div>}
       {leftCollapsed ? <aside className="command-rail collapsed-pane" aria-label="项目面板已折叠"><button className="collapsed-pane-button" onClick={() => setLeftCollapsed(false)} title="显示项目" aria-label="显示项目"><ChevronRight size={17} /></button></aside> : <aside className="command-rail" aria-label="项目和运行控制">
-        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">项目</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="选择其他项目" aria-label="切换项目" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button><button className="icon-button" onClick={() => setLeftCollapsed(true)} title="隐藏项目面板" aria-label="隐藏项目面板"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
+        <div className="rail-section"><div className="rail-section-heading"><button className="section-toggle" onClick={() => setWorkspaceExpanded((expanded) => !expanded)} aria-expanded={workspaceExpanded}><span className="section-toggle-chevron">{workspaceExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">项目</span></button><span className="panel-heading-actions"><button className="icon-button" onClick={() => void chooseDirectory()} title="选择其他项目" aria-label="切换项目" disabled={!session || workspacePhase !== "idle"}><FolderCog size={15} /></button>{session && <button className="icon-button" onClick={() => void loadWorkspaceFiles(session.session_id)} title="刷新文件树" aria-label="刷新文件树" disabled={workspacePhase === "loading"}><RefreshCw size={15} /></button>}<button className="icon-button" onClick={() => setLeftCollapsed(true)} title="隐藏项目面板" aria-label="隐藏项目面板"><ChevronLeft size={15} /></button></span></div>{workspaceExpanded && <>
         {!session ? <button className="button button-primary full-width" onClick={() => void chooseDirectory()} disabled={workspacePhase !== "idle"}>{workspacePhase === "selecting" ? <><FolderOpen size={16} />选择文件夹…</> : workspacePhase === "loading" ? <><LoaderCircle className="spin" size={16} />正在加载项目…</> : <><FolderOpen size={16} />选择项目</>}</button> : <div className="session-bar"><span title={`本地路径：${session.workspace_root}`}>{projectName(workspaceRoot || session.workspace_root)}</span></div>}
         {!session && <div className="workspace-empty-state"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>尚未选择项目</strong><small>选择一个本地项目开始使用。</small></span></div>}
         {workspacePhase === "loading" && <div className="workspace-loading" role="status" aria-live="polite"><LoaderCircle className="spin" size={15} /><span>{projectSwitching ? "正在切换项目…" : "正在读取项目…"}</span></div>}
@@ -1510,7 +1629,46 @@ export default function AgentConsole() {
         {workspacePhase === "loading" && workspaceFiles.length === 0 && <div className="workspace-skeleton" aria-hidden="true"><span /><span /><span /><span /></div>}
         {session && workspacePhase === "idle" && workspaceFiles.length === 0 && <div className="workspace-empty-state workspace-empty-folder"><span className="workspace-empty-icon"><FolderOpen size={17} /></span><span><strong>工作区为空</strong><small>此文件夹中没有可显示的内容。</small></span></div>}
         </>}</div>
-        <div className="rail-resizer" onPointerDown={resizeRailSections} role="separator" aria-label="调整项目和会话面板高度" title="上下拖动调整面板高度"><span /></div><div className="rail-section history-section"><div className="history-section-heading"><button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}><span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span><span className="section-kicker">会话</span></button>{projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="开始新会话"><SquarePen size={14} /><span>新建</span></button>}</div>{historyExpanded && <>{historyLoading ? <p className="history-empty">正在加载会话…</p> : history.length === 0 ? <p className="history-empty">暂无会话。</p> : <div className="project-history-list">{projectGroups.map((group) => { const collapsed = collapsedProjects.has(group.key); const active = group.key === projectKey(session?.workspace_root); return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}><div className="project-history-header-row"><button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `本地路径：${group.root}` : "项目路径不可用"}><span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} 个会话</small></span></span></button><button className="project-new-button" onClick={() => void newConversation(group.root)} title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`}><SquarePen size={14} /></button></div>{!collapsed && <div className="history-list">{group.items.map((item) => { const displayTitle = item.title ?? item.task ?? "新会话"; return <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} key={item.session_id} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time>{formatHistoryDate(item.started_at)}</time></button>; })}</div>}</section>; })}</div>}</>}</div>
+        <div className="rail-resizer" onPointerDown={resizeRailSections} role="separator" aria-label="调整项目和会话面板高度" title="上下拖动调整面板高度"><span /></div>
+        <div className="rail-section history-section">
+          <div className="history-section-heading">
+            <button className="section-toggle" onClick={() => setHistoryExpanded((expanded) => !expanded)} aria-expanded={historyExpanded}>
+              <span className="section-toggle-chevron">{historyExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span>
+              <span className="section-kicker">会话</span>
+            </button>
+            {projectGroups.length === 0 && <button className="new-conversation-button" onClick={() => void newConversation()} title="开始新会话" disabled={backendStatus === "offline"}><SquarePen size={14} /><span>新建</span></button>}
+          </div>
+          {historyExpanded && <>
+            {historyLoading && history.length === 0 && <p className="history-empty">正在加载会话…</p>}
+            {historyError && <div className="history-connection-error" role="status">
+              <strong>{backendStatus === "offline" ? "后端未连接" : "历史记录加载失败"}</strong>
+              <span>{historyError}</span>
+              <button type="button" onClick={() => void loadHistory(true)}>重新连接</button>
+            </div>}
+            {!historyLoading && !historyError && history.length === 0 && <p className="history-empty">暂无会话。</p>}
+            {history.length > 0 && <div className="project-history-list">{projectGroups.map((group) => {
+                      const collapsed = collapsedProjects.has(group.key);
+                      const active = group.key === projectKey(session?.workspace_root);
+                      return <section className={`project-history-group ${active ? "is-active" : ""}`} key={group.key}>
+                        <div className="project-history-header-row">
+                          <button className="project-history-heading" onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; })} aria-expanded={!collapsed} title={group.root ? `本地路径：${group.root}` : "项目路径不可用"}>
+                            <span className="project-history-heading-main"><span className="project-history-chevron">{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span><FolderOpen size={15} /><span><strong>{group.name}</strong><small>{group.items.length} 个会话</small></span></span>
+                          </button>
+                          <button className="project-new-button" onClick={() => void newConversation(group.root)} title={`在 ${group.name} 中新建会话`} aria-label={`在 ${group.name} 中新建会话`}><SquarePen size={14} /></button>
+                          <button className="history-action-button history-action-danger" onClick={() => setPendingDelete({ type: "project", id: group.key, label: group.name })} title="删除项目历史" aria-label={`删除项目历史 ${group.name}`}><Trash2 size={14} /></button>
+                        </div>
+                        {!collapsed && <div className="history-list">{group.items.map((item) => {
+                          const displayTitle = item.title ?? item.task ?? "新会话";
+                          return <div className="history-item-row" key={item.session_id}>
+                            <button className={`history-item ${item.session_id === session?.session_id ? "is-selected" : ""}`} onClick={() => void replayHistory(item.run_id, item.session_id, item.workspace_root)} title={displayTitle}><span className="history-item-copy"><strong>{displayTitle}</strong></span><time>{formatHistoryDate(item.started_at)}</time></button>
+                            <button className="history-action-button" onClick={() => { setEditingHistoryId(item.session_id); setHistoryTitleDraft(displayTitle); }} title="重命名会话"><Pencil size={14} /></button>
+                            <button className="history-action-button history-action-danger" onClick={() => setPendingDelete({ type: "session", id: item.session_id, label: displayTitle })} title="删除会话"><Trash2 size={14} /></button>
+                          </div>;
+                        })}</div>}
+                      </section>;
+                    })}</div>}
+          </>}
+        </div>
         </aside>}
       <div className={`pane-resizer ${leftCollapsed ? "is-hidden" : ""}`} onPointerDown={(event) => resizePane("left", event)} role="separator" aria-label="调整工作区面板宽度"></div>
 

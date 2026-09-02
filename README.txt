@@ -1,41 +1,20 @@
 项目名称：Local Coding Agent
 Git 仓库：https://github.com/Ahedothy/local-coding-agent
 
-【安装】
-在项目根目录执行：
-python -m pip install -e .
-该命令安装运行依赖；测试环境另执行：python -m pip install -e ".[test]"。
-复制 .env.example 为 .env，设置OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL。
-API Key 等凭据不要提交到仓库。
+【项目简介】
+这是一个从零实现的本地编程智能体。用户给出任务后，Agent 会自主理解项目、读写代码、执行测试，并依据结果迭代。项目未使用 Agent 框架或服务端代码/文件工具；模型只生成结构化 tool call，上下文、工具执行、审批、循环和终止条件均由本项目实现。
 
-【命令行使用（CLI）】
-cd backend
-python -m coding_agent.cli C:\path\to\workspace
-工作目录含空格时使用双引号。
-在 > 输入任务，/help 查看提示，/exit 或 /quit 退出。
-执行命令或修改文件前会请求审批：y 允许一次，a 允许本轮；文件修改时输入 d 可查看完整 diff。
-
-【网页界面使用（Web UI）】
-终端一：
-cd backend
-python -m uvicorn coding_agent.api:app --port 8000
-终端二：
-cd frontend
-npm ci
-npm run dev
+【运行】
+要求 Python 3.12+；Web UI 另需 Node.js。
+1. 安装：python -m pip install -e .
+2. 复制 .env.example 为 .env，填写 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL。
+3. CLI：cd backend；python -m coding_agent.cli "工作区路径"
+4. Web：后端运行 python -m uvicorn coding_agent.api:app --port 8000；前端进入 frontend，执行 npm ci 和 npm run dev。
+5. 测试：python -m pip install -e ".[test]"；python -m pytest
 
 【特色功能】
-- 用自然语言完成真实编程任务：阅读项目、定位问题、修改多个文件、运行测试，并根据结果继续修复；
-- Agent 自主组合文件读取、代码搜索、文件编辑、命令执行等工具，完成从分析到验证的闭环；
-- 命令和文件修改先请求审批，可查看涉及的文件与 diff，拒绝操作或只授权当前轮次；
-- CLI 展示计划、工具活动和结论；Web UI 提供可展开 diff、撤销修改、历史回放和继续会话；
-- 支持同一会话多轮追问，CLI 运行记录可在 Web UI 中继续，适合持续迭代开发。
-- 原生读取根目录 AGENTS.md 作为项目指令，并记录注入字符数和截断状态；
-- 以 SHA-256 做乐观并发校验，防止基于过期文件内容覆盖新修改；
-- 验证证据账本、确定性上下文压缩、模型临时错误重试和离线 Agent 任务评测；
-- GitHub Actions 自动运行后端测试、Mock 评测和前端类型检查。
-
-【其它说明】
-项目未使用 Agent 框架或 Agent SDK，重要逻辑均自行实现。real provider 用于实际任务，
-mock provider、事件日志和离线评测用于确定性验证。demo_task_manager 可演示
-“阅读项目—修改代码—运行测试—根据结果继续修复”的完整流程。
+- 自研 Agent Runtime：完成“模型决策—本地工具执行—结果回传—继续推理”的多轮闭环，并用迭代数、工具数、超时、重复失败检测和模型重试避免失控。
+- 完整本地工具链：文件读写与搜索、精确替换、多文件补丁、命令执行、Git diff、环境检查和进程管理；Pydantic 生成 schema 并校验参数。
+- 安全可控：写文件和执行命令前审批，可预览 diff；限制工作区越界、符号链接逃逸、.git 访问和危险命令。读取文件返回 SHA-256，编辑时校验版本，防止覆盖用户的新修改。
+- 可观察、可恢复：统一事件流驱动 CLI、Web SSE、JSONL 和 SQLite；支持多轮追问、历史回放、继续会话及安全撤销。
+- 上下文与质量闭环：确定性压缩旧工具结果、读取 AGENTS.md 项目指令、记录测试/构建等验证证据；提供 Mock Provider、离线评测、192 项通过测试和 CI。

@@ -450,6 +450,17 @@ class Agent:
                 "stopped before overwriting newer content. "
                 "Please check the file and start the edit again."
             )
+        verification = self.verification.summary()
+        if self._turn_diffs and verification.get("status") in {"verified", "partially_verified"}:
+            return AgentRunResult(
+                status=SessionStatus.COMPLETED,
+                final_answer=(
+                    "任务已完成。代码修改已经应用，并且至少有一条验证命令成功通过。"
+                ),
+                iterations=self._iterations,
+                tool_calls=self._tool_calls,
+                verification=verification,
+            )
         return self._failed("maximum iterations exceeded")
 
     async def _schedule_model_retry(

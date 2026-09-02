@@ -294,6 +294,25 @@ class SqliteRunStore:
         try:
             self._ensure_initialized()
             with self._lock, self._connect() as connection:
+                session_row = connection.execute(
+                    "SELECT workspace_root FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                workspace_root = session_row["workspace_root"] if session_row else None
+                existing = {
+                    str(row["title"])
+                    for row in connection.execute(
+                        """SELECT title FROM sessions
+                           WHERE session_id <> ? AND workspace_root = ?""",
+                        (session_id, workspace_root),
+                    ).fetchall()
+                    if row["title"]
+                }
+                unique_title = clean_title
+                suffix = 1
+                while unique_title in existing:
+                    unique_title = f"{clean_title} ({suffix})"
+                    suffix += 1
                 cursor = connection.execute(
                     """
                     UPDATE sessions
@@ -301,9 +320,75 @@ class SqliteRunStore:
                     WHERE session_id = ?
                       AND title = 'New conversation'
                     """,
-                    (clean_title, session_id),
+                    (unique_title, session_id),
                 )
                 return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    def rename_session(self, session_id: str, title: str) -> str | None:
+        """Rename a session, adding a suffix when the title already exists in the same workspace."""
+        clean_title = " ".join(title.split()).strip()
+        if not clean_title:
+            return None
+        try:
+            self._ensure_initialized()
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT workspace_root FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                existing = {
+                    str(item["title"])
+                    for item in connection.execute(
+                        """SELECT title FROM sessions
+                           WHERE session_id <> ? AND workspace_root = ?""",
+                        (session_id, row["workspace_root"]),
+                    ).fetchall()
+                    if item["title"]
+                }
+                unique_title = clean_title
+                suffix = 1
+                while unique_title in existing:
+                    unique_title = f"{clean_title} ({suffix})"
+                    suffix += 1
+                connection.execute(
+                    "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
+                    (unique_title, _now_iso(), session_id),
+                )
+                return unique_title
+        except Exception:
+            return None
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session and all persisted runs, events, and snapshots."""
+        if not session_id:
+            return False
+        try:
+            self._ensure_initialized()
+            with self._lock, self._connect() as connection:
+                run_ids = [
+                    str(row["run_id"])
+                    for row in connection.execute(
+                        "SELECT run_id FROM runs WHERE session_id = ?", (session_id,)
+                    ).fetchall()
+                ]
+                if not run_ids and connection.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+                ).fetchone() is None:
+                    return False
+                connection.execute(
+                    "DELETE FROM events WHERE run_id IN (SELECT run_id FROM runs WHERE session_id = ?)",
+                    (session_id,),
+                )
+                connection.execute(
+                    "DELETE FROM run_states WHERE session_id = ?", (session_id,)
+                )
+                connection.execute("DELETE FROM runs WHERE session_id = ?", (session_id,))
+                connection.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+                return True
         except Exception:
             return False
 

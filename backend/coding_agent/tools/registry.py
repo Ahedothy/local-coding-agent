@@ -34,6 +34,10 @@ class ToolRegistry:
         """Return schemas generated from each tool's Pydantic argument model."""
         return [tool.model_schema() for tool in self._tools.values()]
 
+    def names(self) -> tuple[str, ...]:
+        """Return registered tool names for diagnostics and prompts."""
+        return tuple(self._tools)
+
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 

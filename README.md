@@ -258,6 +258,15 @@ python -m coding_agent.cli C:\path\to\workspace
 
 **Windows 上后端启动后命令执行报 `NotImplementedError`？**  不要使用 `uvicorn --reload`。某些 Windows 环境下 reload 子进程会选择不支持 `create_subprocess_exec` 的事件循环；修改 Python 代码后手动重启后端即可。
 
+**前端显示“后端未连接”、`Failed to fetch`，或 Vite 报 `ECONNREFUSED 127.0.0.1:8000`？**  这表示前端已经运行，但 FastAPI 后端没有监听 8000 端口。请另开终端并保持下面的进程运行，然后在页面的会话区域点击“重新连接”：
+
+```powershell
+cd backend
+python -m uvicorn coding_agent.api:app --port 8000
+```
+
+如果后端使用了其他端口，请同步修改 `frontend/vite.config.ts` 中的代理目标，或设置 `VITE_API_BASE_URL` 指向实际 API 地址。
+
 **路径什么时候需要引号？**  路径不含空格时可以直接写；含空格时必须用双引号。PowerShell 的反斜杠不需要额外转义。
 
 **没有 API key 能否试用？**  可以使用 `--provider mock` 做本地冒烟测试，但它不会模拟真实模型的完整规划能力；完整多轮和工具协作应使用真实 provider，自动化测试则使用仓库内的 Mock provider。
