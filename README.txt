@@ -2,14 +2,14 @@
 Git 仓库：https://github.com/Ahedothy/local-coding-agent
 
 【项目简介】
-这是一个从零实现的本地编程智能体。用户给出任务后，Agent 会自主理解项目、读写代码、执行测试，并依据结果迭代。项目未使用 Agent 框架或服务端代码/文件工具；模型只生成结构化 tool call，上下文、工具执行、审批、循环和终止条件均由本项目实现。
+这是一个从零实现的本地编程智能体。用户提出编程任务后，Agent 通过与大语言模型的多轮对话，自主决定读取文件、执行命令、修改代码，并持续验证结果，直至完成任务。未使用Agent框架；模型输出严格解析为结构化Tool Call；所有工具均在本地执行。
 
 【运行】
 要求 Python 3.12+；Web UI 另需 Node.js。
 1. 安装：python -m pip install -e .
 2. 复制 .env.example 为 .env，填写 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL。
 3. CLI：cd backend；python -m coding_agent.cli "工作区路径"
-4. Web：进入 backend 运行 python -m uvicorn coding_agent.api:app --port 8000；进入 frontend 执行 npm ci 和 npm run dev。
+4. Web：终端1进入 backend 运行 python -m uvicorn coding_agent.api:app --port 8000；终端2进入 frontend 执行 npm ci 和 npm run dev。
 5. 测试：python -m pip install -e ".[test]"；python -m pytest
 
 【特色功能】
