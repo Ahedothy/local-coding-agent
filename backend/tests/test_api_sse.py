@@ -551,4 +551,9 @@ def test_api_same_local_titles_remain_separate_sessions(tmp_path: Path) -> None:
     entries = history.json()
     assert len(entries) == 2
     assert len({entry["session_id"] for entry in entries}) == 2
-    assert [entry["title"] for entry in entries] == ["inspect the project", "inspect the project"]
+    # History is newest-first: the latest session keeps the base title and
+    # earlier sessions in the same workspace receive a numeric suffix.
+    assert {entry["title"] for entry in entries} == {
+        "inspect the project",
+        "inspect the project (1)",
+    }

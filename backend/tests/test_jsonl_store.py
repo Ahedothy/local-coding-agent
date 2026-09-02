@@ -122,5 +122,21 @@ def test_sqlite_session_title_is_set_once(tmp_path: Path) -> None:
     assert store.get_session_title(session.session_id) == "New conversation"
     assert store.set_session_title_if_default(session.session_id, "Fix the parser") is True
     assert store.get_session_title(session.session_id) == "Fix the parser"
-    assert store.set_session_title_if_default(session.session_id, "A later task") is False
-    assert store.get_session_title(session.session_id) == "Fix the parser"
+
+
+def test_sqlite_session_titles_are_unique_per_workspace(tmp_path: Path) -> None:
+    store = SqliteRunStore(tmp_path / "history.db")
+    context = ContextManager("System")
+    first = Session(workspace_root=tmp_path)
+    second = Session(workspace_root=tmp_path)
+    other = Session(workspace_root=tmp_path / "other")
+    assert store.save_session(first, context)
+    assert store.save_session(second, context)
+    assert store.save_session(other, context)
+
+    assert store.set_session_title_if_default(first.session_id, "Same task")
+    assert store.set_session_title_if_default(second.session_id, "Same task")
+    assert store.set_session_title_if_default(other.session_id, "Same task")
+    assert store.get_session_title(first.session_id) == "Same task"
+    assert store.get_session_title(second.session_id) == "Same task (1)"
+    assert store.get_session_title(other.session_id) == "Same task"
